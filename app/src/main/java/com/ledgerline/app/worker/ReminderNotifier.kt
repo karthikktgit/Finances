@@ -33,6 +33,8 @@ class ReminderNotifier @Inject constructor(
             "budget" to "Budgets",
             "anomaly" to "Unusual spending",
             "subscription" to "Subscriptions",
+            "today" to "Today's payments",
+            "cycle" to "New cycle and statements",
         ).forEach { (id, name) ->
             manager.createNotificationChannel(NotificationChannel(id, name, NotificationManager.IMPORTANCE_DEFAULT))
         }
@@ -41,16 +43,7 @@ class ReminderNotifier @Inject constructor(
     suspend fun deliver(snapshot: Dashboard, preferences: UiPreferences) {
         if (!canPost()) return
         ensureChannels()
-        if (preferences.reminderPayments.first()) {
-            snapshot.upcoming.filter { it.date == snapshot.asOf.plusDays(1) && it.direction == CashFlowDirection.OUTFLOW }.forEachIndexed { index, item ->
-                show(1000 + index, "payments", "Payment expected tomorrow", "${item.name} for ${MoneyFormat.format(item.amountMinor, snapshot.currency)} is expected tomorrow.")
-            }
-        }
-        if (preferences.reminderSubscription.first()) {
-            snapshot.upcoming.filter { it.date == snapshot.asOf.plusDays(1) && it.kind == ScheduledKind.SUBSCRIPTION }.forEachIndexed { index, item ->
-                show(2000 + index, "subscription", "Subscription expected tomorrow", "${item.name} for ${MoneyFormat.format(item.amountMinor, snapshot.currency)} is expected tomorrow.")
-            }
-        }
+        // Payments due tomorrow (bills and subscriptions alike) come in the daily reminder at your chosen time.
         if (preferences.reminderBuffer.first()) {
             snapshot.warnings.filter { it.severity == WarningSeverity.HIGH || it.severity == WarningSeverity.CRITICAL }.take(2).forEachIndexed { index, warning ->
                 show(3000 + index, "buffer", warning.title, warning.detail)
@@ -61,6 +54,45 @@ class ReminderNotifier @Inject constructor(
                 show(4000 + index, "budget", budget.budget.name, "${MoneyFormat.format(budget.remainingMinor, snapshot.currency)} left in this budget.")
             }
         }
+    }
+
+    /** Today's (or tomorrow's) payments, one per line. Tapping it opens the app. */
+    fun today(title: String, lines: List<String>, id: Int = 7000) {
+        if (!canPost()) return
+        ensureChannels()
+        val open = context.packageManager.getLaunchIntentForPackage(context.packageName)?.let {
+            android.app.PendingIntent.getActivity(context, 7000, it, android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT)
+        }
+        val style = NotificationCompat.InboxStyle().also { inbox -> lines.take(6).forEach(inbox::addLine) }
+        val notification = NotificationCompat.Builder(context, "today")
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle(title)
+            .setContentText(lines.joinToString(", "))
+            .setStyle(style)
+            .setAutoCancel(true)
+            .apply { open?.let(::setContentIntent) }
+            .build()
+        NotificationManagerCompat.from(context).notify(id, notification)
+    }
+
+    /** The start-of-cycle reminder: download every statement and review it. Tapping opens the new-cycle checklist. */
+    fun newCycle(title: String, body: String) {
+        if (!canPost()) return
+        ensureChannels()
+        val open = android.content.Intent(context, com.ledgerline.app.MainActivity::class.java).apply {
+            putExtra(com.ledgerline.app.detection.capture.CaptureNotifier.OPEN_EXTRA, OPEN_CYCLE)
+            flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP or android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pending = android.app.PendingIntent.getActivity(context, 7100, open, android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT)
+        val notification = NotificationCompat.Builder(context, "cycle")
+            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setAutoCancel(true)
+            .setContentIntent(pending)
+            .build()
+        NotificationManagerCompat.from(context).notify(7100, notification)
     }
 
     private fun canPost(): Boolean {
@@ -76,5 +108,9 @@ class ReminderNotifier @Inject constructor(
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .build()
         NotificationManagerCompat.from(context).notify(id, notification)
+    }
+
+    companion object {
+        const val OPEN_CYCLE = "cycle"
     }
 }

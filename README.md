@@ -13,7 +13,7 @@ Install a recent Android SDK and JDK 17, then:
 ./gradlew :app:testDebugUnitTest
 ```
 
-Open the `app` module in Android Studio and run the debug build. Debug builds seed sample accounts when the ledger is empty. Release builds do not.
+Open the `app` module in Android Studio and run the debug build. The ledger starts empty. A debug build can load sample accounts only from the onboarding button "Explore with sample finances". Release builds do not offer that sample.
 
 Minimum SDK is 28. The project compiles against Android API 37.
 
@@ -29,7 +29,7 @@ Minimum SDK is 28. The project compiles against Android API 37.
 - Repeating-merchant suggestions, subscriptions, and an annualized total
 - Debt payoff estimates for avalanche, snowball, and the order you entered
 - What-if scenarios that do not change the ledger
-- Notification parsing after you turn it on and enable each app
+- Auto-capture: payment alerts from text-message, email, and wallet apps land in a "Captured" inbox to add with one tap, after you turn it on and pick each app
 - A development bank fixture behind `FinancialDataProvider`
 - CSV and JSON export, screenshot blocking, and an optional PIN lock
 - Reminder notifications you enable yourself

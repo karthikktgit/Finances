@@ -15,6 +15,11 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -26,6 +31,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -35,25 +41,23 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.ledgerline.app.data.remote.FinancialDataProvider
 import com.ledgerline.app.data.repository.RecurringSuggestionStore
-import com.ledgerline.app.domain.model.DebtDraft
-import com.ledgerline.app.domain.model.DebtStrategy
-import com.ledgerline.app.domain.model.PaymentPriority
-import com.ledgerline.app.domain.model.SaveResult
 import com.ledgerline.app.domain.model.TransactionStatus
-import com.ledgerline.app.domain.repository.DebtRepository
 import com.ledgerline.app.domain.repository.NotificationSourceRepository
 import com.ledgerline.app.domain.repository.RecurringRepository
 import com.ledgerline.app.domain.repository.SyncLogRepository
 import com.ledgerline.app.domain.repository.TransactionRepository
 import com.ledgerline.app.domain.usecase.ObserveDashboard
-import com.ledgerline.app.finance.debt.DebtPlanner
 import com.ledgerline.app.finance.forecast.CashFlowForecastEngine
+import com.ledgerline.app.finance.forecast.DailyAccountForecast
+import com.ledgerline.app.finance.forecast.ForecastSession
 import com.ledgerline.app.finance.money.MoneyFormat
 import com.ledgerline.app.finance.subscription.SubscriptionRollup
 import com.ledgerline.app.finance.whatif.WhatIfEngine
 import com.ledgerline.app.finance.whatif.WhatIfRequest
 import com.ledgerline.app.preferences.UiPreferences
+import androidx.compose.foundation.layout.FlowRow
 import com.ledgerline.app.ui.components.AmountField
+import com.ledgerline.app.ui.components.CompactButton
 import com.ledgerline.app.ui.components.KeyValue
 import com.ledgerline.app.ui.components.PickerField
 import com.ledgerline.app.ui.components.PrimaryButton
@@ -65,8 +69,6 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import java.math.BigDecimal
-import java.math.RoundingMode
 import javax.inject.Inject
 
 @HiltViewModel
@@ -83,7 +85,6 @@ fun ReviewScreen(onOpen: (String) -> Unit, contentPadding: PaddingValues, viewMo
     val rows by viewModel.rows.collectAsStateWithLifecycle()
     val pending = rows.filter { it.deletedAtEpochMillis == null && it.status == TransactionStatus.DETECTED }
     FeatureColumn(contentPadding) {
-        Text("Needs review", style = MaterialTheme.typography.headlineSmall)
         Text("These rows do not change balances until you confirm them. Marking a duplicate keeps both records and stops the new one from counting.")
         if (pending.isEmpty()) Text("Nothing is waiting.")
         pending.forEach { tx ->
@@ -95,29 +96,6 @@ fun ReviewScreen(onOpen: (String) -> Unit, contentPadding: PaddingValues, viewMo
                 TextButton(onClick = { viewModel.setStatus(tx.id, TransactionStatus.DUPLICATE) }) { Text("Mark duplicate") }
                 TextButton(onClick = { viewModel.setStatus(tx.id, TransactionStatus.IGNORED) }) { Text("Ignore") }
             }
-        }
-    }
-}
-
-@HiltViewModel
-class ForecastViewModel @Inject constructor(observe: ObserveDashboard) : ViewModel() {
-    val dashboard = observe.observe().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
-}
-
-@Composable
-fun ForecastScreen(contentPadding: PaddingValues, viewModel: ForecastViewModel = hiltViewModel()) {
-    val dashboard by viewModel.dashboard.collectAsStateWithLifecycle()
-    FeatureColumn(contentPadding) {
-        Text("Cash-flow forecast", style = MaterialTheme.typography.headlineSmall)
-        val data = dashboard
-        if (data == null) {
-            Text("Loading the projection…")
-            return@FeatureColumn
-        }
-        Text(CashFlowForecastEngine.DISCLAIMER)
-        KeyValue("Estimated discretionary per day", MoneyFormat.format(data.discretionaryDailyMinor, data.currency))
-        data.forecast.forEach { day ->
-            KeyValue(day.date.medium(), MoneyFormat.format(day.balanceAfterMinor, data.currency))
         }
     }
 }
@@ -138,7 +116,6 @@ fun WhatIfScreen(contentPadding: PaddingValues, viewModel: WhatIfViewModel = hil
     var save by remember { mutableStateOf(0L) }
     var cancelId by remember { mutableStateOf<String?>(null) }
     FeatureColumn(contentPadding) {
-        Text("What if", style = MaterialTheme.typography.headlineSmall)
         Text("This scenario is temporary. It does not change accounts, transactions, or schedules.")
         val pair = state
         if (pair == null) {
@@ -197,7 +174,6 @@ fun SubscriptionsScreen(onEdit: (String) -> Unit, contentPadding: PaddingValues,
     val active = SubscriptionRollup.active(items, currency)
     val monthly = SubscriptionRollup.monthlyMinor(active)
     FeatureColumn(contentPadding) {
-        Text("Subscriptions", style = MaterialTheme.typography.headlineSmall)
         KeyValue("This month", MoneyFormat.format(monthly, currency))
         KeyValue("Annualized", MoneyFormat.format(SubscriptionRollup.annualizedMinor(monthly), currency))
         Text("Annualized is the monthly figure times 12. Weekly and yearly schedules are converted before that.")
@@ -220,81 +196,47 @@ fun SubscriptionsScreen(onEdit: (String) -> Unit, contentPadding: PaddingValues,
 }
 
 @HiltViewModel
-class DebtViewModel @Inject constructor(private val debts: DebtRepository) : ViewModel() {
-    val rows = debts.observe().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-    var name by mutableStateOf("")
-    var balance by mutableStateOf(0L)
-    var apr by mutableStateOf("0")
-    var minimum by mutableStateOf(0L)
-    var dueDay by mutableStateOf("1")
-    var priority by mutableStateOf(PaymentPriority.MANDATORY)
-    var strategy by mutableStateOf(DebtStrategy.AVALANCHE)
-    var extra by mutableStateOf(0L)
-    var message by mutableStateOf<String?>(null)
-
-    fun save() {
-        viewModelScope.launch {
-            val points = apr.toBigDecimalOrNull()?.movePointRight(2)?.setScale(0, RoundingMode.HALF_UP)?.toInt()
-            if (points == null) {
-                message = "Enter the APR as a percent, such as 19.99."
-                return@launch
-            }
-            val result = debts.save(
-                DebtDraft(null, name, balance, points, minimum, dueDay.toIntOrNull() ?: 0, priority),
-            )
-            message = if (result is SaveResult.Invalid) result.message else "Saved."
-            if (result is SaveResult.Saved) name = ""
-        }
-    }
-
-    fun delete(id: String) {
-        viewModelScope.launch { debts.delete(id) }
-    }
-}
-
-@Composable
-fun DebtScreen(contentPadding: PaddingValues, viewModel: DebtViewModel = hiltViewModel()) {
-    val rows by viewModel.rows.collectAsStateWithLifecycle()
-    val currency = rows.firstOrNull()?.currency ?: "USD"
-    val plan = DebtPlanner.plan(rows, viewModel.extra, viewModel.strategy)
-    FeatureColumn(contentPadding) {
-        Text("Debt plan", style = MaterialTheme.typography.headlineSmall)
-        Text(DebtPlanner.ASSUMPTION)
-        PickerField("Strategy", viewModel.strategy.name.lowercase(), DebtStrategy.entries.toList(), { it.name.lowercase() }) {
-            viewModel.strategy = it
-        }
-        Text("Extra monthly payment")
-        AmountField(viewModel.extra, currency) { viewModel.extra = it }
-        KeyValue("Months", if (plan.unfinished) "More than ${plan.months}" else plan.months.toString())
-        KeyValue("Estimated interest", MoneyFormat.format(plan.interestMinor, currency))
-        KeyValue("Order", plan.payoffOrder.joinToString(", ").ifBlank { "None" })
-        rows.forEach { debt ->
-            TextButton(onClick = { viewModel.delete(debt.id) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                Text("${debt.name} · ${MoneyFormat.format(debt.balanceMinor, debt.currency)} · ${aprLabel(debt.aprBasisPoints)} · remove")
-            }
-        }
-        SectionLabel("Add a debt")
-        OutlinedTextField(viewModel.name, { viewModel.name = it }, Modifier.fillMaxWidth(), label = { Text("Name") }, singleLine = true)
-        Text("Current balance")
-        AmountField(viewModel.balance, currency) { viewModel.balance = it }
-        OutlinedTextField(viewModel.apr, { viewModel.apr = it }, Modifier.fillMaxWidth(), label = { Text("APR percent") }, singleLine = true)
-        Text("Minimum payment")
-        AmountField(viewModel.minimum, currency) { viewModel.minimum = it }
-        OutlinedTextField(viewModel.dueDay, { viewModel.dueDay = it.filter(Char::isDigit).take(2) }, Modifier.fillMaxWidth(), label = { Text("Due day") }, singleLine = true)
-        PickerField("Priority", viewModel.priority.label(), PaymentPriority.entries.toList(), { it.label() }) { viewModel.priority = it }
-        PrimaryButton("Save debt", onClick = viewModel::save)
-        viewModel.message?.let { Text(it) }
-    }
-}
-
-@HiltViewModel
 class DetectionViewModel @Inject constructor(
     private val preferences: UiPreferences,
     private val sources: NotificationSourceRepository,
+    private val todayReminder: com.ledgerline.app.worker.TodayReminderScheduler,
 ) : ViewModel() {
+    val remindToday = preferences.remindToday.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
+    val reminderMinutes = preferences.reminderMinutes.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 540)
+
+    fun setRemindToday(value: Boolean) {
+        viewModelScope.launch {
+            preferences.setRemindToday(value)
+            todayReminder.schedule()
+        }
+    }
+
+    fun setPaymentsAhead(value: Boolean) {
+        viewModelScope.launch {
+            preferences.setReminder("payments", value)
+            todayReminder.schedule()
+        }
+    }
+
+    val statements = preferences.reminderStatements.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
+
+    fun setStatements(value: Boolean) {
+        viewModelScope.launch {
+            preferences.setReminderStatements(value)
+            todayReminder.schedule()
+        }
+    }
+
+    fun setReminderTime(minutes: Int) {
+        viewModelScope.launch {
+            preferences.setReminderMinutes(minutes)
+            todayReminder.schedule()
+        }
+    }
+
     val enabled = preferences.notificationDetection.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
     val apps = sources.observe().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-    val payments = preferences.reminderPayments.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+    val payments = preferences.reminderPayments.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), true)
     val buffer = preferences.reminderBuffer.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
     val budget = preferences.reminderBudget.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
     val anomaly = preferences.reminderAnomaly.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
@@ -318,42 +260,42 @@ class DetectionViewModel @Inject constructor(
 }
 
 @Composable
-fun DetectionScreen(contentPadding: PaddingValues, viewModel: DetectionViewModel = hiltViewModel()) {
-    val enabled by viewModel.enabled.collectAsStateWithLifecycle()
-    val apps by viewModel.apps.collectAsStateWithLifecycle()
+fun RemindersScreen(contentPadding: PaddingValues, viewModel: DetectionViewModel = hiltViewModel()) {
     val payments by viewModel.payments.collectAsStateWithLifecycle()
     val buffer by viewModel.buffer.collectAsStateWithLifecycle()
     val budget by viewModel.budget.collectAsStateWithLifecycle()
     val anomaly by viewModel.anomaly.collectAsStateWithLifecycle()
     val subscription by viewModel.subscription.collectAsStateWithLifecycle()
-    val context = LocalContext.current
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
     FeatureColumn(contentPadding) {
-        Text("Transaction detection", style = MaterialTheme.typography.headlineSmall)
-        Text("Notification text is read on this device. Ledgerline stores the extracted amount, merchant, and account ending. It does not upload the notification.")
-        Text("Notification access ${if (enabled) "on" else "off"}")
-        Switch(checked = enabled, onCheckedChange = viewModel::setEnabled)
-        TextButton(
-            onClick = { context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) },
-            modifier = Modifier.heightIn(min = 48.dp),
-        ) { Text("Open notification access settings") }
-        apps.forEach { app ->
-            TextButton(onClick = { viewModel.setApp(app.id, !app.enabled) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-                Text("${if (app.enabled) "On" else "Off"} · ${app.label}")
-            }
-        }
-        SectionLabel("Reminders")
-        Text("Reminders stay off until you enable a type. Android may also ask for notification permission.")
+        Text(
+            "Ledgerline can nudge you before money moves. Each type stays off until you turn it on.",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         if (Build.VERSION.SDK_INT >= 33) {
             TextButton(onClick = { permission.launch(Manifest.permission.POST_NOTIFICATIONS) }, modifier = Modifier.heightIn(min = 48.dp)) {
-                Text("Allow reminder notifications")
+                Text("Allow Ledgerline to show notifications")
             }
         }
-        ReminderRow("Payments", payments) { viewModel.setReminder("payments", it) }
-        ReminderRow("Buffer", buffer) { viewModel.setReminder("buffer", it) }
-        ReminderRow("Budgets", budget) { viewModel.setReminder("budget", it) }
-        ReminderRow("Unusual amounts", anomaly) { viewModel.setReminder("anomaly", it) }
-        ReminderRow("Subscriptions", subscription) { viewModel.setReminder("subscription", it) }
+        val remindToday by viewModel.remindToday.collectAsStateWithLifecycle()
+        val minutes by viewModel.reminderMinutes.collectAsStateWithLifecycle()
+        val context = androidx.compose.ui.platform.LocalContext.current
+        ReminderRow("Today's payments", remindToday) { viewModel.setRemindToday(it) }
+        val statements by viewModel.statements.collectAsStateWithLifecycle()
+        if (remindToday || payments || statements) {
+            val time = java.time.LocalTime.of(minutes / 60, minutes % 60)
+            com.ledgerline.app.ui.components.NavRowCompat(
+                label = "Remind me at",
+                value = time.format(java.time.format.DateTimeFormatter.ofPattern("h:mm a", java.util.Locale.getDefault())),
+            ) {
+                android.app.TimePickerDialog(context, { _, h, m -> viewModel.setReminderTime(h * 60 + m) }, minutes / 60, minutes % 60, false).show()
+            }
+        }
+        ReminderRow("A day before each scheduled payment", payments) { viewModel.setPaymentsAhead(it) }
+        ReminderRow("Each new cycle: download and review bank statements", statements) { viewModel.setStatements(it) }
+        ReminderRow("Balance getting low", buffer) { viewModel.setReminder("buffer", it) }
+        ReminderRow("Budget nearly used", budget) { viewModel.setReminder("budget", it) }
+        ReminderRow("Unusually large spend", anomaly) { viewModel.setReminder("anomaly", it) }
     }
 }
 
@@ -378,7 +320,6 @@ class BankViewModel @Inject constructor(
 fun BankScreen(contentPadding: PaddingValues, viewModel: BankViewModel = hiltViewModel()) {
     val records by viewModel.records.collectAsStateWithLifecycle()
     FeatureColumn(contentPadding) {
-        Text("Bank connection", style = MaterialTheme.typography.headlineSmall)
         Text(viewModel.description.ifBlank { "Loading…" })
         PrimaryButton("Import development fixture", onClick = viewModel::refresh)
         records.take(8).forEach { record ->
@@ -398,12 +339,6 @@ private fun FeatureColumn(contentPadding: PaddingValues, content: @Composable an
 
 @Composable
 private fun ReminderRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    TextButton(onClick = { onChange(!checked) }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-        Text("$label · ${if (checked) "on" else "off"}")
-    }
+    com.ledgerline.app.ui.transactions.SwitchRow(title = label, body = null, checked = checked, onChange = onChange)
 }
 
-private fun aprLabel(basisPoints: Int): String {
-    val percent = BigDecimal.valueOf(basisPoints.toLong()).movePointLeft(2).stripTrailingZeros().toPlainString()
-    return "$percent% APR"
-}

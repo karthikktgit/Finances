@@ -14,18 +14,23 @@ import kotlinx.serialization.json.Json
 object LedgerExport {
     private val json = Json { prettyPrint = true }
 
+    /**
+     * Amounts are integer minor units in storage. Here they become plain decimal numbers in major units,
+     * for example 4500 minor units in USD is `45.00`. Numeric columns are written without quotes, symbols,
+     * thousands separators, or locale formatting, so spreadsheets read them as numbers.
+     * `amount` is the absolute size; `balance_effect` is the signed change to the account balance.
+     */
     fun csv(transactions: List<LedgerTransaction>, accounts: List<Account>, categories: List<Category>): String {
-        val accountNames = accounts.associate { it.id to it.name }
+        val accountNames = accounts.associate { it.id to com.ledgerline.app.finance.account.AccountDeletion.label(it.id, accounts) }
         val categoryNames = categories.associate { it.id to it.name }
         val header = listOf(
             "id",
             "date",
             "posted_date",
             "type",
-            "amount_minor",
             "amount",
+            "balance_effect",
             "currency",
-            "balance_effect_minor",
             "merchant",
             "normalized_merchant",
             "description",
@@ -38,30 +43,32 @@ object LedgerExport {
             "note",
             "fingerprint",
             "deleted",
+            "unplanned",
         ).joinToString(",")
         val rows = transactions.sortedBy { it.occurredOn }.map { tx ->
+            // Each cell is either already-safe numeric/ISO text or goes through csvCell.
             listOf(
-                tx.id,
+                csvCell(tx.id),
                 tx.occurredOn.toString(),
                 tx.postedOn?.toString().orEmpty(),
-                tx.type.name,
-                tx.amountMinor.toString(),
-                MoneyFormat.formatPlain(tx.amountMinor, tx.currency),
-                tx.currency,
-                tx.balanceEffectMinor.toString(),
-                tx.merchantRaw,
-                tx.merchantNormalized,
-                tx.description,
-                categoryNames[tx.categoryId].orEmpty(),
-                accountNames[tx.accountId].orEmpty(),
-                accountNames[tx.counterAccountId].orEmpty(),
-                tx.detectionSource.name,
+                csvCell(tx.type.name),
+                csvNumber(tx.amountMinor, tx.currency),
+                csvNumber(tx.balanceEffectMinor, tx.currency),
+                csvCell(tx.currency),
+                csvCell(tx.merchantRaw),
+                csvCell(tx.merchantNormalized),
+                csvCell(tx.description),
+                csvCell(categoryNames[tx.categoryId].orEmpty()),
+                csvCell(accountNames[tx.accountId].orEmpty()),
+                csvCell(accountNames[tx.counterAccountId].orEmpty()),
+                csvCell(tx.detectionSource.name),
                 tx.confidencePercent.toString(),
-                tx.status.name,
-                tx.note,
-                tx.fingerprint,
+                csvCell(tx.status.name),
+                csvCell(tx.note),
+                csvCell(tx.fingerprint),
                 if (tx.deletedAtEpochMillis == null) "false" else "true",
-            ).joinToString(",") { csvCell(it) }
+                if (tx.unplanned) "true" else "false",
+            ).joinToString(",")
         }
         return (listOf(header) + rows).joinToString("\n")
     }
@@ -85,7 +92,7 @@ object LedgerExport {
                 ExportAccount(
                     it.id, it.name, it.institution, it.type.name, it.lastFour, it.openingBalanceMinor,
                     it.creditLimitMinor, it.currency, it.active, it.includeInNetWorth, it.includeInSafeToSpend,
-                    it.syncStatus.name,
+                    it.syncStatus.name, it.deleted, it.deletedAtEpochMillis,
                 )
             },
             categories = categories.map {
@@ -96,12 +103,14 @@ object LedgerExport {
                     it.id, it.accountId, it.counterAccountId, it.amountMinor, it.balanceEffectMinor, it.currency,
                     it.type.name, it.merchantRaw, it.merchantNormalized, it.categoryId, it.occurredOn.toString(),
                     it.detectionSource.name, it.confidencePercent, it.status.name, it.note, it.deletedAtEpochMillis != null,
+                    it.unplanned,
                 )
             },
             recurring = recurring.map {
                 ExportRecurring(
                     it.id, it.name, it.accountId, it.categoryId, it.direction.name, it.kind.name, it.amountMinor,
-                    it.currency, it.frequency.name, it.startOn.toString(), it.priority.name, it.incomeConfidence.name, it.active,
+                    it.currency, it.frequency.name, it.startOn.toString(), it.endOn?.toString(), it.maxOccurrences,
+                    it.priority.name, it.incomeConfidence.name, it.active,
                 )
             },
             budgets = budgets.map {
@@ -110,6 +119,9 @@ object LedgerExport {
         )
         return json.encodeToString(document)
     }
+
+    /** A plain decimal such as `45.00`, `-12.30`, or `0.01`. Never quoted, prefixed, or localized. */
+    fun csvNumber(minor: Long, currency: String): String = MoneyFormat.formatPlain(minor, currency)
 
     fun csvCell(value: String): String {
         val guarded = if (value.firstOrNull() in listOf('=', '+', '-', '@')) "'$value" else value
@@ -145,6 +157,8 @@ private data class ExportAccount(
     val includeInNetWorth: Boolean,
     val includeInSafeToSpend: Boolean,
     val syncStatus: String,
+    val deleted: Boolean = false,
+    val deletedAtEpochMillis: Long? = null,
 )
 
 @Serializable
@@ -174,6 +188,7 @@ private data class ExportTransaction(
     val status: String,
     val note: String,
     val deleted: Boolean,
+    val unplanned: Boolean = false,
 )
 
 @Serializable
@@ -188,6 +203,8 @@ private data class ExportRecurring(
     val currency: String,
     val frequency: String,
     val startOn: String,
+    val endOn: String? = null,
+    val maxOccurrences: Int? = null,
     val priority: String,
     val incomeConfidence: String,
     val active: Boolean,

@@ -12,8 +12,9 @@ import com.ledgerline.app.domain.model.SafeToSpendResult
  *     - committed payments inside the horizon
  *     - minimum buffer
  *     - planned transfers out of liquid accounts
- *     + expected income the user marked high or medium confidence
  *     - remaining discretionary budget reserved by the user
+ *
+ * Expected future income is not included. It stays on the forecast.
  * ```
  *
  * Amounts are minor currency units. Inputs that represent money leaving the
@@ -23,8 +24,8 @@ import com.ledgerline.app.domain.model.SafeToSpendResult
  */
 object SafeToSpendEngine {
     const val DISCLAIMER =
-        "Estimated from the accounts, scheduled items, budgets, and buffer stored on this device. " +
-            "Based on current information. This is not a guarantee."
+        "Estimated from money already in eligible accounts, minus unpaid obligations in the selected cycle and your buffer. " +
+            "Expected income is not included. This is not a guarantee."
 
     data class Input(
         val liquidBalanceMinor: Long,
@@ -33,6 +34,8 @@ object SafeToSpendEngine {
         val plannedTransfersMinor: Long,
         val expectedIncomeMinor: Long,
         val plannedDiscretionaryMinor: Long,
+        /** This cycle's savings-goal plan not yet saved, plus goal money kept in spending accounts. */
+        val goalSetAsideMinor: Long = 0,
     )
 
     fun calculate(input: Input): SafeToSpendResult {
@@ -41,8 +44,8 @@ object SafeToSpendEngine {
             SafeToSpendLine("Committed payments", -nonNegative(input.committedPaymentsMinor)),
             SafeToSpendLine("Minimum buffer", -nonNegative(input.minimumBufferMinor)),
             SafeToSpendLine("Planned transfers", -nonNegative(input.plannedTransfersMinor)),
-            SafeToSpendLine("Expected income", nonNegative(input.expectedIncomeMinor)),
             SafeToSpendLine("Planned discretionary spending", -nonNegative(input.plannedDiscretionaryMinor)),
+            SafeToSpendLine("Savings goals", -nonNegative(input.goalSetAsideMinor)),
         )
         return SafeToSpendResult(
             amountMinor = lines.sumOf { it.minor },

@@ -59,8 +59,7 @@ class BudgetsViewModel @Inject constructor(dashboard: ObserveDashboard) : ViewMo
 @Composable
 fun BudgetsScreen(onEdit: (String) -> Unit, onCreate: () -> Unit, contentPadding: PaddingValues, viewModel: BudgetsViewModel = hiltViewModel()) {
     val dashboard by viewModel.dashboard.collectAsStateWithLifecycle()
-    Column(Modifier.fillMaxSize().padding(contentPadding).padding(20.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("Budgets", style = MaterialTheme.typography.headlineSmall)
+    Column(Modifier.fillMaxSize().padding(contentPadding).padding(20.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Projected means the current pace continued through the period. It is an estimate.")
         TextButton(onClick = onCreate, modifier = Modifier.heightIn(min = 48.dp)) { Text("Add budget") }
         val budgets = dashboard?.budgets.orEmpty()
@@ -138,7 +137,7 @@ fun BudgetEditorScreen(onDone: () -> Unit, viewModel: BudgetEditorViewModel = hi
     Scaffold(topBar = {
         TopAppBar(title = { Text("Budget") }, navigationIcon = { TextButton(onClick = onDone, modifier = Modifier.heightIn(min = 48.dp)) { Text("Back") } })
     }) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding).padding(20.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.fillMaxSize().padding(padding).padding(20.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             androidx.compose.material3.OutlinedTextField(viewModel.name, { viewModel.name = it }, Modifier.fillMaxWidth(), label = { Text("Name") }, singleLine = true)
             AmountField(viewModel.amountMinor, "USD") { viewModel.amountMinor = it }
             PickerField("Period", viewModel.period.label(), BudgetPeriod.entries.toList(), { it.label() }) { viewModel.period = it }

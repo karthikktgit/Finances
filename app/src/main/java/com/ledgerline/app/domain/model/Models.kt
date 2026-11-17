@@ -2,6 +2,7 @@ package com.ledgerline.app.domain.model
 
 import java.time.LocalDate
 
+
 data class Account(
     val id: String,
     val name: String,
@@ -18,7 +19,10 @@ data class Account(
     val lastSyncedAtEpochMillis: Long?,
     val syncError: String?,
     val sortOrder: Int,
-)
+    val deletedAtEpochMillis: Long? = null,
+) {
+    val deleted: Boolean get() = deletedAtEpochMillis != null
+}
 
 data class Category(
     val id: String,
@@ -55,6 +59,11 @@ data class LedgerTransaction(
     val createdAtEpochMillis: Long,
     val updatedAtEpochMillis: Long,
     val deletedAtEpochMillis: Long?,
+    val unplanned: Boolean = false,
+    /** False for a planned spend not paid yet. It counts nowhere until it is paid. */
+    val paid: Boolean = true,
+    /** The day it was planned for, if it was planned first. */
+    val plannedOn: LocalDate? = null,
 )
 
 data class RecurringPayment(
@@ -76,6 +85,9 @@ data class RecurringPayment(
     val incomeConfidence: IncomeConfidence,
     val active: Boolean,
     val note: String,
+    val maxOccurrences: Int? = null,
+    /** Due dates on or after this day are marked paid automatically. Null means you mark them paid. */
+    val autopaySince: LocalDate? = null,
 )
 
 data class Budget(
@@ -88,13 +100,27 @@ data class Budget(
     val currency: String,
     val reservesSafeToSpend: Boolean,
     val active: Boolean,
-)
+    /** First day of the first cycle it is planned in; null means always. */
+    val startOn: LocalDate? = null,
+    /** First day of the last cycle it is planned in; null means it goes on. */
+    val endOn: LocalDate? = null,
+    /** How many cycles it runs for, when set that way. */
+    val maxCycles: Int? = null,
+) {
+    /** Planned in the cycle starting [cycleStart]. */
+    fun runsIn(cycleStart: LocalDate): Boolean =
+        (startOn == null || !startOn.isAfter(cycleStart)) && (endOn == null || !cycleStart.isAfter(endOn))
+}
 
 data class UserSettings(
     val primaryCurrency: String,
     val minimumBufferMinor: Long,
     val horizonDays: Int,
     val onboardingCompleted: Boolean,
+    val cycleType: CycleType = CycleType.MONTHLY,
+    val cycleAnchor: java.time.LocalDate = java.time.LocalDate.of(2026, 1, 20),
+    val cycleStartDay: Int = 20,
+    val cycleSecondDay: Int = 5,
 )
 
 data class MerchantRecord(
@@ -122,6 +148,10 @@ data class TransactionDraft(
     val occurredOn: LocalDate,
     val note: String,
     val acknowledgeDuplicate: Boolean,
+    val adjustmentDecreases: Boolean = false,
+    val unplanned: Boolean = false,
+    /** A spend you are planning, not one already paid. */
+    val notPaidYet: Boolean = false,
 )
 
 data class AccountDraft(
@@ -155,6 +185,18 @@ data class RecurringDraft(
     val incomeConfidence: IncomeConfidence,
     val active: Boolean,
     val note: String,
+    val endOn: LocalDate? = null,
+    val maxOccurrences: Int? = null,
+    val autopaySince: LocalDate? = null,
+)
+
+data class OccurrenceAdjustment(
+    val recurringId: String,
+    val occurrenceOn: LocalDate,
+    val state: OccurrenceState,
+    val amountMinor: Long?,
+    val name: String?,
+    val paidTransactionId: String?,
 )
 
 data class BudgetDraft(
@@ -165,6 +207,14 @@ data class BudgetDraft(
     val amountMinor: Long,
     val reservesSafeToSpend: Boolean,
     val active: Boolean,
+    /** The account this money is kept in. Only changed when [setAccount] is true, so older editors leave it alone. */
+    val accountId: String? = null,
+    val setAccount: Boolean = false,
+    /** When it runs. Only changed when [setSchedule] is true. */
+    val setSchedule: Boolean = false,
+    val startOn: LocalDate? = null,
+    val endOn: LocalDate? = null,
+    val maxCycles: Int? = null,
 )
 
 sealed interface SaveResult {

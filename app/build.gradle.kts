@@ -17,12 +17,31 @@ android {
         applicationId = "com.ledgerline.app"
         minSdk = 28
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 25
+        versionName = "0.17.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {
+        // Like debug but not debuggable, installed alongside under its own id, for measuring smoothness on a phone
+        // without touching the real app's data. Not for everyday use.
+        create("perf") {
+            initWith(getByName("debug"))
+            // -PperfDebuggable=true builds the same app debuggable, to compare like with like on the same data.
+            isDebuggable = project.findProperty("perfDebuggable") == "true"
+            applicationIdSuffix = ".perf"
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("debug")
+        }
+        // For a personal phone: same app id and signing key as debug, so it installs over a debug build and keeps
+        // its data, but not debuggable, so it runs at full speed (Android does not precompile debuggable apps).
+        // Build: ./gradlew :app:assemblePhone -x lintVitalAnalyzePhone -x lintVitalReportPhone -x lintVitalPhone
+        create("phone") {
+            initWith(getByName("debug"))
+            isDebuggable = false
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += listOf("debug")
+        }
         release {
             isMinifyEnabled = true
             proguardFiles(

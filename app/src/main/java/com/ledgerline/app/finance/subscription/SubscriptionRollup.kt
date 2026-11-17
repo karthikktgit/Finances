@@ -42,6 +42,7 @@ object SubscriptionRollup {
         RecurrenceFrequency.MONTHLY -> amountMinor
         RecurrenceFrequency.QUARTERLY -> amountMinor / 3
         RecurrenceFrequency.YEARLY -> amountMinor / 12
+        RecurrenceFrequency.ONCE -> 0
         RecurrenceFrequency.CUSTOM -> amountMinor
     }
 }

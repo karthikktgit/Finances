@@ -2,7 +2,8 @@
 <resources>
 
     <style name="Theme.Ledgerline" parent="android:Theme.Material.Light.NoActionBar">
-        <item name="android:windowBackground">@color/window_background</item>
+        <item name="android:fontFamily">@font/inter_regular</item>
+        <item name="android:windowBackground">@drawable/splash_background</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
     </style>

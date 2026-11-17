@@ -28,13 +28,31 @@ object BalanceMath {
         TransactionStatus.MODIFIED,
     )
 
+    /** Counts toward balances and spending: not deleted, confirmed, and actually paid (not just planned). */
     fun isActive(transaction: LedgerTransaction): Boolean =
-        transaction.deletedAtEpochMillis == null && transaction.status in countingStatuses
+        transaction.deletedAtEpochMillis == null && transaction.status in countingStatuses && transaction.paid
+
+    /** A spend planned but not paid yet. */
+    fun isPlannedUnpaid(transaction: LedgerTransaction): Boolean =
+        transaction.deletedAtEpochMillis == null && transaction.status in countingStatuses && !transaction.paid
 
     fun currentBalanceMinor(account: Account, transactions: List<LedgerTransaction>): Long {
         val movement = transactions
             .asSequence()
             .filter { isActive(it) && it.accountId == account.id }
+            .sumOf { it.balanceEffectMinor }
+        return account.openingBalanceMinor + movement
+    }
+
+    /**
+     * End-of-day posted balance. The opening balance is the baseline before any
+     * saved transaction. Each completed transaction counts on its financial date,
+     * which is a calendar date, not a timezone-shifted timestamp.
+     */
+    fun balanceAsOf(account: Account, transactions: List<LedgerTransaction>, date: java.time.LocalDate): Long {
+        val movement = transactions
+            .asSequence()
+            .filter { isActive(it) && it.accountId == account.id && !it.occurredOn.isAfter(date) }
             .sumOf { it.balanceEffectMinor }
         return account.openingBalanceMinor + movement
     }

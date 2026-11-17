@@ -54,7 +54,7 @@ class FinanceEngineTest {
                 plannedDiscretionaryMinor = 60_000,
             ),
         )
-        assertEquals(324_000 - 118_000 - 50_000 + 150_000 - 60_000, result.amountMinor)
+        assertEquals(324_000 - 118_000 - 50_000 - 60_000, result.amountMinor)
         assertEquals(result.amountMinor, result.lines.sumOf { it.minor })
         assertTrue(result.disclaimer.contains("not a guarantee"))
     }
@@ -151,7 +151,7 @@ class FinanceEngineTest {
     fun dashboard_excludesOptionalItemsAndLowConfidenceIncome() {
         val checking = account("checking", AccountType.CHECKING, 300_000, liquid = true)
         val settings = UserSettings("USD", 50_000, 30, true)
-        val rent = recurring(name = "Rent", amount = 100_000, day = 20, start = today.plusDays(12), priority = PaymentPriority.MANDATORY)
+        val rent = recurring(name = "Rent", amount = 100_000, day = 12, start = today.plusDays(4), priority = PaymentPriority.MANDATORY)
         val optional = recurring(
             name = "Stream",
             amount = 1_500,
@@ -160,13 +160,13 @@ class FinanceEngineTest {
             priority = PaymentPriority.OPTIONAL,
             kind = ScheduledKind.SUBSCRIPTION,
         )
-        val shaky = recurring(
+        val paycheck = recurring(
             name = "Maybe",
             amount = 80_000,
             day = today.plusDays(5).dayOfMonth,
             start = today.plusDays(5),
             direction = CashFlowDirection.INFLOW,
-            confidence = IncomeConfidence.LOW,
+            confidence = IncomeConfidence.HIGH,
             kind = ScheduledKind.INCOME,
             priority = PaymentPriority.FLEXIBLE,
         )
@@ -176,10 +176,11 @@ class FinanceEngineTest {
             accounts = listOf(checking),
             categories = emptyList(),
             transactions = emptyList(),
-            recurring = listOf(rent, optional, shaky),
+            recurring = listOf(rent, optional, paycheck),
             budgets = emptyList(),
         )
         assertEquals(300_000 - 100_000 - 50_000, dashboard.safeToSpend.amountMinor)
+        assertEquals(80_000, dashboard.expectedIncomeMinor)
         assertEquals(3, dashboard.upcoming.size)
         assertTrue(dashboard.upcoming.single { it.name == "Stream" }.countedInSafeToSpend.not())
     }

@@ -21,6 +21,7 @@ data class ScheduledOccurrence(
     val incomeConfidence: IncomeConfidence,
     val countedInSafeToSpend: Boolean,
     val liquidDeltaMinor: Long,
+    val overdue: Boolean = false,
 )
 
 data class BudgetSnapshot(
@@ -57,6 +58,7 @@ data class SafeToSpendResult(
 )
 
 data class Dashboard(
+    val goals: List<com.ledgerline.app.finance.goals.GoalProgress> = emptyList(),
     val asOf: LocalDate,
     val currency: String,
     val horizonDays: Int,
@@ -79,6 +81,10 @@ data class Dashboard(
     val needsReviewCount: Int,
     val forecast: List<ForecastDay>,
     val discretionaryDailyMinor: Long,
+    val cycleStart: java.time.LocalDate = asOf,
+    val cycleEnd: java.time.LocalDate = asOf,
+    val cycleOutgoingsMinor: Long = 0,
+    val forecastSchedule: List<ScheduledOccurrence> = emptyList(),
 )
 
 data class CategorySpend(

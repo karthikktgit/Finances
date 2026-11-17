@@ -27,9 +27,11 @@ class FinanceMaintenanceWorker @AssistedInject constructor(
     private val suggestions: RecurringSuggestionStore,
     private val reminders: ReminderNotifier,
     private val clock: AppClock,
+    private val autoPay: com.ledgerline.app.finance.schedule.AutoPay,
 ) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         return try {
+            autoPay.settleDue()
             val snapshot = dashboard.current()
             preferences.recordMaintenance(
                 safeToSpendMinor = snapshot.safeToSpend.amountMinor,

@@ -10,8 +10,11 @@ import com.ledgerline.app.data.local.database.LedgerDatabase
 import com.ledgerline.app.data.local.database.Migrations
 import com.ledgerline.app.data.repository.AccountRepositoryImpl
 import com.ledgerline.app.data.repository.BudgetRepositoryImpl
+import com.ledgerline.app.data.repository.CaptureRepositoryImpl
 import com.ledgerline.app.data.repository.CategoryRepositoryImpl
+import com.ledgerline.app.data.repository.GoalRepositoryImpl
 import com.ledgerline.app.data.repository.DebtRepositoryImpl
+import com.ledgerline.app.data.repository.ExpenseNoteRepositoryImpl
 import com.ledgerline.app.data.repository.LedgerReadModelImpl
 import com.ledgerline.app.data.repository.MerchantRepositoryImpl
 import com.ledgerline.app.data.repository.NotificationSourceRepositoryImpl
@@ -23,8 +26,11 @@ import com.ledgerline.app.data.repository.SyncLogRepositoryImpl
 import com.ledgerline.app.data.repository.TransactionRepositoryImpl
 import com.ledgerline.app.domain.repository.AccountRepository
 import com.ledgerline.app.domain.repository.BudgetRepository
+import com.ledgerline.app.domain.repository.CaptureRepository
 import com.ledgerline.app.domain.repository.CategoryRepository
+import com.ledgerline.app.domain.repository.GoalRepository
 import com.ledgerline.app.domain.repository.DebtRepository
+import com.ledgerline.app.domain.repository.ExpenseNoteRepository
 import com.ledgerline.app.domain.repository.LedgerReadModel
 import com.ledgerline.app.domain.repository.MerchantRepository
 import com.ledgerline.app.domain.repository.NotificationSourceRepository
@@ -81,7 +87,19 @@ abstract class RepositoryModule {
 
     @Binds abstract fun debts(impl: DebtRepositoryImpl): DebtRepository
 
+    @Binds abstract fun expenseNotes(impl: ExpenseNoteRepositoryImpl): ExpenseNoteRepository
+
     @Binds abstract fun notificationSources(impl: NotificationSourceRepositoryImpl): NotificationSourceRepository
+
+    @Binds abstract fun goals(impl: GoalRepositoryImpl): GoalRepository
+
+    @Binds abstract fun cyclePlans(impl: com.ledgerline.app.data.repository.CyclePlanRepositoryImpl): com.ledgerline.app.domain.repository.CyclePlanRepository
+
+    @Binds abstract fun homeGroups(impl: com.ledgerline.app.data.repository.HomeGroupRepositoryImpl): com.ledgerline.app.domain.repository.HomeGroupRepository
+
+    @Binds abstract fun captures(impl: CaptureRepositoryImpl): CaptureRepository
+
+    @Binds abstract fun captureAlerts(impl: com.ledgerline.app.detection.capture.CaptureNotifier): com.ledgerline.app.detection.capture.CaptureAlerts
 
     @Binds abstract fun syncLog(impl: SyncLogRepositoryImpl): SyncLogRepository
 

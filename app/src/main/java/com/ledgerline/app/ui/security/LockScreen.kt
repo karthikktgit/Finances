@@ -117,8 +117,7 @@ fun LockGate(viewModel: LockViewModel = hiltViewModel(), content: @Composable ()
 @Composable
 fun LockSetupScreen(viewModel: LockViewModel = hiltViewModel()) {
     val enabled by viewModel.enabled.collectAsStateWithLifecycle()
-    Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text("App lock", style = MaterialTheme.typography.headlineSmall)
+    Column(Modifier.fillMaxSize().padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(if (enabled) "A PIN is required after you leave Ledgerline." else "App lock is off. Set a PIN to require it.")
         Text("The PIN is checked with a key that stays in Android Keystore. Ledgerline does not store the PIN itself.")
         LockPanel(viewModel, gate = false)
@@ -128,7 +127,7 @@ fun LockSetupScreen(viewModel: LockViewModel = hiltViewModel()) {
 @Composable
 private fun LockPanel(viewModel: LockViewModel, gate: Boolean) {
     val context = LocalContext.current
-    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         if (gate) {
             Text("Ledgerline is locked", style = MaterialTheme.typography.headlineSmall)
             TextButton(onClick = {

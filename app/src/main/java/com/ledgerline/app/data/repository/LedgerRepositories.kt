@@ -8,6 +8,7 @@ import com.ledgerline.app.data.local.entity.BudgetEntity
 import com.ledgerline.app.data.local.entity.CategoryEntity
 import com.ledgerline.app.data.local.entity.MerchantCategoryRuleEntity
 import com.ledgerline.app.data.local.entity.MerchantEntity
+import com.ledgerline.app.data.local.entity.RecurringOccurrenceEntity
 import com.ledgerline.app.data.local.entity.RecurringPaymentEntity
 import com.ledgerline.app.data.local.entity.TransactionEntity
 import com.ledgerline.app.data.local.seed.CategoryCatalog
@@ -24,9 +25,12 @@ import com.ledgerline.app.domain.model.IngestResult
 import com.ledgerline.app.domain.model.LedgerTransaction
 import com.ledgerline.app.domain.model.MerchantCategoryRule
 import com.ledgerline.app.domain.model.Necessity
+import com.ledgerline.app.domain.model.OccurrenceState
+import com.ledgerline.app.domain.model.RecurrenceFrequency
 import com.ledgerline.app.domain.model.RecurringDraft
 import com.ledgerline.app.domain.model.RecurringPayment
 import com.ledgerline.app.domain.model.SaveResult
+import com.ledgerline.app.domain.model.SeriesScope
 import com.ledgerline.app.domain.model.SyncStatus
 import com.ledgerline.app.domain.model.TransactionDraft
 import com.ledgerline.app.domain.model.TransactionStatus
@@ -42,12 +46,15 @@ import com.ledgerline.app.domain.repository.SettingsRepository
 import com.ledgerline.app.domain.repository.TransactionRepository
 import com.ledgerline.app.domain.time.AppClock
 import com.ledgerline.app.finance.balance.BalanceMath
+import com.ledgerline.app.finance.category.StandardCategories
 import com.ledgerline.app.finance.duplicate.DuplicateCandidate
 import com.ledgerline.app.finance.duplicate.DuplicateDetector
 import com.ledgerline.app.finance.fingerprint.TransactionFingerprint
 import com.ledgerline.app.finance.merchant.MerchantNormalizer
 import com.ledgerline.app.finance.money.MoneyFormat
 import com.ledgerline.app.finance.policy.FinancePolicy
+import com.ledgerline.app.finance.schedule.OccurrenceMaterializer
+import com.ledgerline.app.finance.schedule.SeriesEdit
 import com.ledgerline.app.finance.validation.TransactionRules
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -60,6 +67,7 @@ import kotlin.math.abs
 class AccountRepositoryImpl @Inject constructor(
     private val database: LedgerDatabase,
     private val clock: AppClock,
+    private val undoCenter: com.ledgerline.app.ui.undo.UndoCenter,
 ) : AccountRepository {
     override fun observe(): Flow<List<Account>> = database.accounts().observe().map { rows -> rows.map { it.toDomain() } }
 
@@ -70,7 +78,12 @@ class AccountRepositoryImpl @Inject constructor(
         val now = clock.now().toEpochMilli()
         val currency = database.settings().get()?.primaryCurrency ?: "USD"
         val target = signedBalance(draft)
-        return database.withTransaction {
+        var adjustmentId: String? = null
+        val retired = draft.existingId?.let { id ->
+            database.accounts().get(id) == null && database.accounts().getAllIncludingDeleted().any { it.id == id }
+        } ?: false
+        if (retired) return SaveResult.Invalid("This account was deleted. Nothing was saved.")
+        val result = database.withTransaction {
             val existing = draft.existingId?.let { database.accounts().get(it) }
             if (existing == null) {
                 val id = draft.existingId ?: Ids.new()
@@ -118,7 +131,7 @@ class AccountRepositoryImpl @Inject constructor(
                     val current = BalanceMath.currentBalanceMinor(domain, transactions)
                     val delta = target - current
                     if (delta != 0L) {
-                        insertAdjustment(
+                        adjustmentId = insertAdjustment(
                             accountId = existing.id,
                             currency = existing.currency,
                             delta = delta,
@@ -130,6 +143,17 @@ class AccountRepositoryImpl @Inject constructor(
             }
             SaveResult.Saved
         }
+        val createdAdjustment = adjustmentId
+        if (result is SaveResult.Saved && createdAdjustment != null) {
+            undoCenter.offer("Balance updated") {
+                val row = database.transactions().get(createdAdjustment) ?: return@offer
+                val stamp = clock.now().toEpochMilli()
+                database.transactions().update(
+                    row.copy(deletedAtEpochMillis = stamp, updatedAtEpochMillis = stamp),
+                )
+            }
+        }
+        return result
     }
 
     override suspend fun deleteIfUnused(id: String): SaveResult {
@@ -145,7 +169,56 @@ class AccountRepositoryImpl @Inject constructor(
         return SaveResult.Saved
     }
 
-    private suspend fun insertAdjustment(accountId: String, currency: String, delta: Long, now: Long, today: LocalDate) {
+    override fun observeIncludingDeleted(): Flow<List<Account>> =
+        database.accounts().observeIncludingDeleted().map { rows -> rows.map { it.toDomain() } }
+
+    override suspend fun deletionImpact(id: String): com.ledgerline.app.finance.account.AccountDeletionImpact =
+        com.ledgerline.app.finance.account.AccountDeletion.impact(
+            accountId = id,
+            transactions = database.transactions().getAll().map { it.toDomain() },
+            recurring = database.recurring().getAll().map { it.toDomain() },
+            debts = database.debts().getAll().map { com.ledgerline.app.finance.account.DebtLink(it.id, it.accountId, it.paymentAccountId) },
+            budgets = database.budgets().getAll().map { it.toDomain() },
+        )
+
+    override suspend fun delete(id: String): SaveResult {
+        val account = database.accounts().get(id)
+            ?: return SaveResult.Invalid("This account is already deleted or no longer on this device. Nothing changed.")
+        val now = clock.now().toEpochMilli()
+        val today = clock.today()
+        database.withTransaction {
+            val recurring = database.recurring().getAll()
+            val debts = database.debts().getAll()
+            val budgets = database.budgets().getAll()
+            val plan = com.ledgerline.app.finance.account.AccountDeletion.plan(
+                accountId = id,
+                recurring = recurring.map { it.toDomain() },
+                debts = debts.map { com.ledgerline.app.finance.account.DebtLink(it.id, it.accountId, it.paymentAccountId) },
+                budgets = budgets.map { it.toDomain() },
+            )
+            val note = { existing: String -> com.ledgerline.app.finance.account.AccountDeletion.reviewNote(existing, account.name, today) }
+            recurring.filter { it.id in plan.pausedScheduleIds }.forEach { row ->
+                database.recurring().update(row.copy(active = false, note = note(row.note), updatedAtEpochMillis = now))
+            }
+            debts.filter { it.id in plan.unlinkedDebtIds }.forEach { row ->
+                database.debts().update(
+                    row.copy(
+                        accountId = row.accountId.takeUnless { it == id },
+                        paymentAccountId = row.paymentAccountId.takeUnless { it == id },
+                        note = note(row.note),
+                        updatedAtEpochMillis = now,
+                    ),
+                )
+            }
+            budgets.filter { it.id in plan.pausedBudgetIds }.forEach { row ->
+                database.budgets().update(row.copy(active = false, updatedAtEpochMillis = now))
+            }
+            database.accounts().markDeleted(id, now)
+        }
+        return SaveResult.Saved
+    }
+
+    private suspend fun insertAdjustment(accountId: String, currency: String, delta: Long, now: Long, today: LocalDate): String {
         val normalized = "Balance Adjustment"
         val id = Ids.new()
         database.transactions().insert(
@@ -177,6 +250,7 @@ class AccountRepositoryImpl @Inject constructor(
                 deletedAtEpochMillis = null,
             ),
         )
+        return id
     }
 
     private fun signedBalance(draft: AccountDraft): Long =
@@ -187,8 +261,12 @@ class AccountRepositoryImpl @Inject constructor(
 class TransactionRepositoryImpl @Inject constructor(
     private val database: LedgerDatabase,
     private val clock: AppClock,
+    private val undoCenter: com.ledgerline.app.ui.undo.UndoCenter,
 ) : TransactionRepository {
     override fun observeAll(): Flow<List<LedgerTransaction>> =
+        database.transactions().observeLive().map { rows -> rows.map { it.toDomain() } }
+
+    override fun observeHistory(): Flow<List<LedgerTransaction>> =
         database.transactions().observe().map { rows -> rows.map { it.toDomain() } }
 
     override suspend fun get(id: String): LedgerTransaction? = database.transactions().get(id)?.toDomain()
@@ -248,17 +326,24 @@ class TransactionRepositoryImpl @Inject constructor(
             return SaveResult.PossibleDuplicate(duplicate.score, duplicate.existingId, summary)
         }
         val now = clock.now().toEpochMilli()
-        return database.withTransaction {
+        val prior = draft.existingId?.let { id ->
+            val row = database.transactions().get(id) ?: return SaveResult.Invalid("That transaction is no longer on this device.")
+            row.linkId?.let { database.transactions().byLink(it) } ?: listOf(row)
+        }
+        val createdIds = mutableListOf<String>()
+        val result = database.withTransaction {
             val merchantId = upsertMerchant(normalized, draft.merchant, now)
             val paired = draft.type == TransactionType.TRANSFER || draft.type == TransactionType.PAYMENT
             if (draft.existingId == null) {
                 val linkId = if (paired) Ids.new() else null
+                val primaryId = Ids.new()
+                createdIds += primaryId
                 insertRow(
-                    id = Ids.new(),
+                    id = primaryId,
                     draft = draft,
                     account = source,
                     counter = counter,
-                    effect = BalanceMath.effectFor(draft.type, draft.amountMinor),
+                    effect = effect(draft),
                     merchantLabel = draft.merchant.ifBlank { defaultPairLabel(draft.type, counter?.name, outgoing = true) },
                     normalized = normalized,
                     merchantId = merchantId,
@@ -269,12 +354,14 @@ class TransactionRepositoryImpl @Inject constructor(
                     sourceKind = DetectionSource.MANUAL,
                 )
                 if (paired && counter != null) {
+                    val secondaryId = Ids.new()
+                    createdIds += secondaryId
                     insertRow(
-                        id = Ids.new(),
+                        id = secondaryId,
                         draft = draft,
                         account = counter,
                         counter = source,
-                        effect = -BalanceMath.effectFor(draft.type, draft.amountMinor),
+                        effect = -effect(draft),
                         merchantLabel = defaultPairLabel(draft.type, source.name, outgoing = false),
                         normalized = normalized,
                         merchantId = merchantId,
@@ -296,7 +383,7 @@ class TransactionRepositoryImpl @Inject constructor(
                     val primary = siblings.firstOrNull { it.balanceEffectMinor <= 0 } ?: current
                     val secondary = siblings.firstOrNull { it.id != primary.id }
                     val linkId = if (paired) primary.linkId ?: Ids.new() else null
-                    updateRow(primary, draft, source, counter, BalanceMath.effectFor(draft.type, draft.amountMinor), draft.merchant.ifBlank { primary.merchantRaw }, normalized, merchantId, linkId, now)
+                    updateRow(primary, draft, source, counter, effect(draft), draft.merchant.ifBlank { primary.merchantRaw }, normalized, merchantId, linkId, now)
                     if (paired && counter != null) {
                         if (secondary != null && secondary.deletedAtEpochMillis == null) {
                             updateRow(
@@ -304,7 +391,7 @@ class TransactionRepositoryImpl @Inject constructor(
                                 draft,
                                 counter,
                                 source,
-                                -BalanceMath.effectFor(draft.type, draft.amountMinor),
+                                -effect(draft),
                                 defaultPairLabel(draft.type, source.name, outgoing = false),
                                 normalized,
                                 merchantId,
@@ -317,7 +404,7 @@ class TransactionRepositoryImpl @Inject constructor(
                                 draft = draft,
                                 account = counter,
                                 counter = source,
-                                effect = -BalanceMath.effectFor(draft.type, draft.amountMinor),
+                                effect = -effect(draft),
                                 merchantLabel = defaultPairLabel(draft.type, source.name, outgoing = false),
                                 normalized = normalized,
                                 merchantId = merchantId,
@@ -336,9 +423,34 @@ class TransactionRepositoryImpl @Inject constructor(
                 }
             }
         }
+        if (result is SaveResult.Saved) {
+            if (prior != null) {
+                undoCenter.offer("Transaction saved") {
+                    database.withTransaction {
+                        prior.forEach { database.transactions().update(it) }
+                    }
+                }
+            } else if (createdIds.isNotEmpty()) {
+                undoCenter.offer("Transaction added") {
+                    createdIds.forEach { markDeleted(it) }
+                }
+            }
+        }
+        return result
     }
 
     override suspend fun softDelete(id: String) {
+        val row = database.transactions().get(id) ?: return
+        val rows = row.linkId?.let { database.transactions().byLink(it) } ?: listOf(row)
+        markDeleted(id)
+        undoCenter.offer("Transaction deleted") {
+            database.withTransaction {
+                rows.forEach { database.transactions().update(it) }
+            }
+        }
+    }
+
+    private suspend fun markDeleted(id: String) {
         val now = clock.now().toEpochMilli()
         database.withTransaction {
             val row = database.transactions().get(id) ?: return@withTransaction
@@ -499,6 +611,13 @@ class TransactionRepositoryImpl @Inject constructor(
         )
     }
 
+    private fun effect(draft: TransactionDraft): Long {
+        if (draft.type == TransactionType.ADJUSTMENT) {
+            return if (draft.adjustmentDecreases) -kotlin.math.abs(draft.amountMinor) else kotlin.math.abs(draft.amountMinor)
+        }
+        return BalanceMath.effectFor(draft.type, draft.amountMinor)
+    }
+
     private suspend fun insertRow(
         id: String,
         draft: TransactionDraft,
@@ -551,6 +670,10 @@ class TransactionRepositoryImpl @Inject constructor(
                 createdAtEpochMillis = created,
                 updatedAtEpochMillis = now,
                 deletedAtEpochMillis = null,
+                unplanned = draft.type == TransactionType.EXPENSE && draft.unplanned ||
+                    draft.type == TransactionType.REFUND && draft.unplanned,
+                paid = !(draft.notPaidYet && draft.type == TransactionType.EXPENSE),
+                plannedOn = if (draft.notPaidYet && draft.type == TransactionType.EXPENSE) draft.occurredOn.toString() else null,
             ),
         )
     }
@@ -603,6 +726,25 @@ class TransactionRepositoryImpl @Inject constructor(
                 ),
                 updatedAtEpochMillis = now,
                 deletedAtEpochMillis = null,
+                unplanned = draft.type == TransactionType.EXPENSE && draft.unplanned ||
+                    draft.type == TransactionType.REFUND && draft.unplanned,
+                paid = !(draft.notPaidYet && draft.type == TransactionType.EXPENSE),
+                plannedOn = existing.plannedOn ?: if (draft.notPaidYet && draft.type == TransactionType.EXPENSE) draft.occurredOn.toString() else null,
+            ),
+        )
+    }
+
+    /** Marks a planned spend paid on [on]. It starts to count from that day; the planned day is kept. */
+    override suspend fun markSpendPaid(id: String, on: java.time.LocalDate) {
+        val row = database.transactions().get(id) ?: return
+        if (row.paid) return
+        database.transactions().update(
+            row.copy(
+                paid = true,
+                plannedOn = row.plannedOn ?: row.occurredOn,
+                occurredOn = on.toString(),
+                postedOn = on.toString(),
+                updatedAtEpochMillis = clock.now().toEpochMilli(),
             ),
         )
     }
@@ -651,21 +793,31 @@ class CategoryRepositoryImpl @Inject constructor(
     override fun observe(): Flow<List<Category>> = database.categories().observe().map { rows -> rows.map { it.toDomain() } }
 
     override suspend fun ensureDefaults() {
-        if (database.categories().count() > 0) return
         val now = clock.now().toEpochMilli()
-        database.categories().insertAll(
-            CategoryCatalog.ALL.map { seed ->
-                CategoryEntity(
-                    id = seed.id,
-                    parentId = seed.parentId,
-                    name = seed.name,
-                    necessity = seed.necessity.name,
-                    archived = false,
-                    sortOrder = seed.order,
-                    createdAtEpochMillis = now,
-                )
-            },
+        fun entity(seed: CategoryCatalog.Seed) = CategoryEntity(
+            id = seed.id,
+            parentId = seed.parentId,
+            name = seed.name,
+            necessity = seed.necessity.name,
+            archived = seed.archived,
+            sortOrder = seed.order,
+            createdAtEpochMillis = now,
         )
+        if (database.categories().count() == 0) {
+            database.categories().insertAll(CategoryCatalog.ALL.map(::entity))
+            return
+        }
+        // Existing data: add the standard categories, rename the ones that match, hide the old defaults.
+        // Nothing is deleted and no transaction is re-pointed, so history keeps its original category.
+        val plan = StandardCategories.plan(database.categories().getAll().map { it.toDomain() })
+        if (plan.empty) return
+        database.withTransaction {
+            database.categories().insertAll(plan.insert.map(::entity))
+            plan.reshape.forEach { seed ->
+                database.categories().reshape(seed.id, seed.name, seed.parentId, seed.necessity.name, seed.order)
+            }
+            plan.archiveIds.forEach { id -> database.categories().setArchived(id, true) }
+        }
     }
 
     override suspend fun addCustom(name: String, parentId: String?, necessity: Necessity) {
@@ -694,44 +846,55 @@ class CategoryRepositoryImpl @Inject constructor(
 class RecurringRepositoryImpl @Inject constructor(
     private val database: LedgerDatabase,
     private val clock: AppClock,
+    private val undoCenter: com.ledgerline.app.ui.undo.UndoCenter,
 ) : RecurringRepository {
     override fun observe(): Flow<List<RecurringPayment>> =
         database.recurring().observe().map { rows -> rows.map { it.toDomain() } }
 
+    override fun observeAdjustments(): Flow<List<com.ledgerline.app.domain.model.OccurrenceAdjustment>> =
+        database.occurrenceRecords().observe().map { rows -> rows.map { it.toDomain() } }
+
     override suspend fun get(id: String): RecurringPayment? = database.recurring().get(id)?.toDomain()
 
-    override suspend fun save(draft: RecurringDraft): SaveResult {
+    override suspend fun save(
+        draft: RecurringDraft,
+        scope: SeriesScope,
+        occurrenceOn: LocalDate?,
+    ): SaveResult {
         val account = database.accounts().get(draft.accountId)?.toDomain()
         TransactionRules.validate(draft, account)?.let { return SaveResult.Invalid(it) }
         val source = checkNotNull(account)
         val now = clock.now().toEpochMilli()
-        val entity = RecurringPaymentEntity(
-            id = draft.existingId ?: Ids.new(),
-            name = draft.name.trim(),
-            accountId = source.id,
-            categoryId = draft.categoryId,
-            direction = draft.direction.name,
-            kind = draft.kind.name,
-            amountMinor = draft.amountMinor,
-            currency = source.currency,
-            frequency = draft.frequency.name,
-            intervalDays = draft.intervalDays,
-            dayOfMonth = draft.dayOfMonth,
-            dayOfWeek = draft.dayOfWeek,
-            startOn = draft.startOn.toString(),
-            endOn = null,
-            priority = draft.priority.name,
-            incomeConfidence = if (draft.direction == com.ledgerline.app.domain.model.CashFlowDirection.INFLOW) {
-                draft.incomeConfidence.name
-            } else {
-                com.ledgerline.app.domain.model.IncomeConfidence.NONE.name
-            },
-            active = draft.active,
-            note = draft.note.trim(),
-            createdAtEpochMillis = now,
-            updatedAtEpochMillis = now,
-        )
         val existing = draft.existingId?.let { database.recurring().get(it) }
+        if (existing != null && scope == SeriesScope.THIS_OCCURRENCE) {
+            val date = occurrenceOn ?: return SaveResult.Invalid("Choose the payment date to change.")
+            upsertOccurrence(
+                recurringId = existing.id,
+                date = date,
+                state = OccurrenceState.SCHEDULED,
+                amountMinor = draft.amountMinor,
+                name = draft.name.trim(),
+                paidTransactionId = database.occurrenceRecords().get(existing.id, date.toString())?.paidTransactionId,
+                now = now,
+            )
+            return SaveResult.Saved
+        }
+        if (existing != null && scope == SeriesScope.THIS_AND_FUTURE && occurrenceOn != null && occurrenceOn.isAfter(existing.toDomain().startOn)) {
+            val current = existing.toDomain()
+            val ended = SeriesEdit.endBefore(current, occurrenceOn)
+            database.recurring().update(
+                existing.copy(
+                    endOn = ended.endOn?.toString(),
+                    active = ended.active,
+                    updatedAtEpochMillis = now,
+                ),
+            )
+            database.recurring().insert(
+                entityFrom(draft, source, now, id = Ids.new(), startOn = occurrenceOn, maxOccurrences = draft.maxOccurrences),
+            )
+            return SaveResult.Saved
+        }
+        val entity = entityFrom(draft, source, now, id = existing?.id ?: draft.existingId ?: Ids.new(), startOn = draft.startOn, maxOccurrences = draft.maxOccurrences)
         if (existing == null) {
             database.recurring().insert(entity)
         } else {
@@ -740,8 +903,223 @@ class RecurringRepositoryImpl @Inject constructor(
         return SaveResult.Saved
     }
 
-    override suspend fun delete(id: String) {
-        database.recurring().delete(id)
+    override suspend fun delete(id: String, scope: SeriesScope, occurrenceOn: LocalDate?) {
+        when (scope) {
+            SeriesScope.ENTIRE_SERIES -> {
+                val existing = database.recurring().get(id) ?: return
+                database.recurring().delete(id)
+                undoCenter.offer("Bill deleted") { database.recurring().insert(existing) }
+            }
+            SeriesScope.THIS_OCCURRENCE -> {
+                val date = occurrenceOn ?: return
+                skip(id, date)
+            }
+            SeriesScope.THIS_AND_FUTURE -> {
+                val date = occurrenceOn ?: return
+                val existing = database.recurring().get(id) ?: return
+                val ended = SeriesEdit.endBefore(existing.toDomain(), date)
+                database.recurring().update(
+                    existing.copy(
+                        endOn = ended.endOn?.toString(),
+                        active = ended.active,
+                        updatedAtEpochMillis = clock.now().toEpochMilli(),
+                    ),
+                )
+                undoCenter.offer("Bill updated") { database.recurring().update(existing) }
+            }
+        }
+    }
+
+    override suspend fun markPaid(id: String, occurrenceOn: LocalDate, automatic: Boolean): SaveResult {
+        val existing = database.recurring().get(id) ?: return SaveResult.Invalid("That payment is no longer on this device.")
+        val item = existing.toDomain()
+        val dateKey = occurrenceOn.toString()
+        val current = database.occurrenceRecords().get(id, dateKey)
+        if (current?.state == OccurrenceState.PAID.name) return SaveResult.Saved
+        val now = clock.now().toEpochMilli()
+        val adjustment = current?.toDomain()
+        val amount = adjustment?.amountMinor?.takeIf { it > 0 } ?: item.amountMinor
+        val name = adjustment?.name?.takeIf { it.isNotBlank() } ?: item.name
+        val result = database.withTransaction {
+            val linked = database.transactions().forOccurrence(id, dateKey)
+            val transactionId = if (linked != null && linked.status in POSTED_STATUSES) {
+                linked.id
+            } else {
+                val type = OccurrenceMaterializer.postedTransactionType(item)
+                val createdId = Ids.new()
+                val normalized = MerchantNormalizer.normalize(name)
+                database.transactions().insert(
+                    TransactionEntity(
+                        id = createdId,
+                        accountId = item.accountId,
+                        counterAccountId = null,
+                        linkId = null,
+                        amountMinor = amount,
+                        balanceEffectMinor = BalanceMath.effectFor(type, amount),
+                        currency = item.currency,
+                        type = type.name,
+                        merchantRaw = name,
+                        merchantNormalized = normalized.ifBlank { name },
+                        merchantId = null,
+                        description = name,
+                        categoryId = item.categoryId,
+                        occurredOn = dateKey,
+                        postedOn = dateKey,
+                        detectionSource = DetectionSource.MANUAL.name,
+                        confidencePercent = FinancePolicy.MANUAL_CONFIDENCE_PERCENT,
+                        recurringPaymentId = id,
+                        status = TransactionStatus.CONFIRMED.name,
+                        userConfirmed = true,
+                        note = if (automatic) "Paid automatically on the due date (autopay)." else "Marked paid from the payment calendar.",
+                        fingerprint = TransactionFingerprint.of(item.currency, amount, item.accountId, occurrenceOn, type, normalized.ifBlank { name }),
+                        createdAtEpochMillis = now,
+                        updatedAtEpochMillis = now,
+                        deletedAtEpochMillis = null,
+                    ),
+                )
+                createdId
+            }
+            upsertOccurrence(
+                recurringId = id,
+                date = occurrenceOn,
+                state = OccurrenceState.PAID,
+                amountMinor = amount,
+                name = name,
+                paidTransactionId = transactionId,
+                now = now,
+            )
+            SaveResult.Saved
+        }
+        // Automatic payments happen in the background; an undo notice for them would appear out of nowhere.
+        if (result is SaveResult.Saved && !automatic) {
+            val posted = database.transactions().forOccurrence(id, dateKey)
+            undoCenter.offer("Marked paid") {
+                val stamp = clock.now().toEpochMilli()
+                database.withTransaction {
+                    if (posted != null && current?.paidTransactionId != posted.id) {
+                        database.transactions().update(posted.copy(deletedAtEpochMillis = stamp, updatedAtEpochMillis = stamp))
+                    }
+                    if (current != null) {
+                        database.occurrenceRecords().upsert(current)
+                    } else {
+                        upsertOccurrence(id, occurrenceOn, OccurrenceState.SCHEDULED, amount, name, null, stamp)
+                    }
+                }
+            }
+        }
+        return result
+    }
+
+    override suspend fun skip(id: String, occurrenceOn: LocalDate): SaveResult {
+        val existing = database.recurring().get(id) ?: return SaveResult.Invalid("That payment is no longer on this device.")
+        val current = database.occurrenceRecords().get(id, occurrenceOn.toString())
+        if (current?.state == OccurrenceState.PAID.name) {
+            return SaveResult.Invalid("That date is already paid. The posted transaction stays on the account.")
+        }
+        upsertOccurrence(
+            recurringId = existing.id,
+            date = occurrenceOn,
+            state = OccurrenceState.SKIPPED,
+            amountMinor = current?.amountMinor,
+            name = current?.name,
+            paidTransactionId = null,
+            now = clock.now().toEpochMilli(),
+        )
+        undoCenter.offer("Skipped date restored") {
+            if (current != null) {
+                database.occurrenceRecords().upsert(current)
+            } else {
+                upsertOccurrence(existing.id, occurrenceOn, OccurrenceState.SCHEDULED, null, null, null, clock.now().toEpochMilli())
+            }
+        }
+        return SaveResult.Saved
+    }
+
+    override suspend fun setOccurrence(id: String, occurrenceOn: LocalDate, amountMinor: Long?, skipped: Boolean): SaveResult {
+        val existing = database.recurring().get(id) ?: return SaveResult.Invalid("That payment is no longer on this device.")
+        val current = database.occurrenceRecords().get(id, occurrenceOn.toString())
+        if (current?.state == OccurrenceState.PAID.name) return SaveResult.Invalid("That date is already paid.")
+        upsertOccurrence(
+            recurringId = existing.id,
+            date = occurrenceOn,
+            state = if (skipped) OccurrenceState.SKIPPED else OccurrenceState.SCHEDULED,
+            amountMinor = amountMinor?.takeIf { it > 0 },
+            name = current?.name,
+            paidTransactionId = null,
+            now = clock.now().toEpochMilli(),
+        )
+        return SaveResult.Saved
+    }
+
+    private fun entityFrom(
+        draft: RecurringDraft,
+        source: com.ledgerline.app.domain.model.Account,
+        now: Long,
+        id: String,
+        startOn: LocalDate,
+        maxOccurrences: Int?,
+    ) = RecurringPaymentEntity(
+        id = id,
+        name = draft.name.trim(),
+        accountId = source.id,
+        categoryId = draft.categoryId,
+        direction = draft.direction.name,
+        kind = draft.kind.name,
+        amountMinor = draft.amountMinor,
+        currency = source.currency,
+        frequency = draft.frequency.name,
+        intervalDays = if (draft.frequency == RecurrenceFrequency.CUSTOM) draft.intervalDays else null,
+        dayOfMonth = startOn.dayOfMonth,
+        dayOfWeek = startOn.dayOfWeek.value,
+        startOn = startOn.toString(),
+        endOn = if (draft.frequency == RecurrenceFrequency.ONCE) null else draft.endOn?.toString(),
+        priority = draft.priority.name,
+        incomeConfidence = if (draft.direction == com.ledgerline.app.domain.model.CashFlowDirection.INFLOW) {
+            draft.incomeConfidence.name
+        } else {
+            com.ledgerline.app.domain.model.IncomeConfidence.NONE.name
+        },
+        active = draft.active,
+        note = draft.note.trim(),
+        createdAtEpochMillis = now,
+        updatedAtEpochMillis = now,
+        maxOccurrences = if (draft.frequency == RecurrenceFrequency.ONCE) 1 else maxOccurrences,
+        autopaySince = draft.autopaySince?.toString(),
+    )
+
+    private suspend fun upsertOccurrence(
+        recurringId: String,
+        date: LocalDate,
+        state: OccurrenceState,
+        amountMinor: Long?,
+        name: String?,
+        paidTransactionId: String?,
+        now: Long,
+    ) {
+        val key = date.toString()
+        val previous = database.occurrenceRecords().get(recurringId, key)
+        database.occurrenceRecords().upsert(
+            RecurringOccurrenceEntity(
+                id = previous?.id ?: "$recurringId|$key",
+                recurringPaymentId = recurringId,
+                occurrenceOn = key,
+                state = state.name,
+                amountMinor = amountMinor,
+                name = name,
+                paidTransactionId = paidTransactionId,
+                note = "",
+                createdAtEpochMillis = previous?.createdAtEpochMillis ?: now,
+                updatedAtEpochMillis = now,
+            ),
+        )
+    }
+
+    private companion object {
+        val POSTED_STATUSES = setOf(
+            TransactionStatus.CONFIRMED.name,
+            TransactionStatus.RECONCILED.name,
+            TransactionStatus.MODIFIED.name,
+        )
     }
 }
 
@@ -763,7 +1141,7 @@ class BudgetRepositoryImpl @Inject constructor(
             id = existing?.id ?: Ids.new(),
             name = draft.name.trim(),
             categoryId = draft.categoryId,
-            accountId = null,
+            accountId = if (draft.setAccount) draft.accountId else existing?.accountId,
             period = draft.period.name,
             amountMinor = draft.amountMinor,
             currency = currency,
@@ -771,6 +1149,9 @@ class BudgetRepositoryImpl @Inject constructor(
             active = draft.active,
             createdAtEpochMillis = existing?.createdAtEpochMillis ?: now,
             updatedAtEpochMillis = now,
+            startOn = if (draft.setSchedule) draft.startOn?.toString() else existing?.startOn,
+            endOn = if (draft.setSchedule) draft.endOn?.toString() else existing?.endOn,
+            maxCycles = if (draft.setSchedule) draft.maxCycles else existing?.maxCycles,
         )
         if (existing == null) database.budgets().insert(entity) else database.budgets().update(entity)
         return SaveResult.Saved
@@ -804,6 +1185,10 @@ class SettingsRepositoryImpl @Inject constructor(
                 minimumBufferMinor = settings.minimumBufferMinor.coerceAtLeast(0),
                 horizonDays = TransactionRules.clampHorizon(settings.horizonDays),
                 onboardingCompleted = settings.onboardingCompleted,
+                cycleType = settings.cycleType.name,
+                cycleAnchor = settings.cycleAnchor.toString(),
+                cycleStartDay = settings.cycleStartDay.coerceIn(1, 31),
+                cycleSecondDay = settings.cycleSecondDay.coerceIn(1, 31),
                 updatedAtEpochMillis = clock.now().toEpochMilli(),
                 id = current?.id ?: 1,
             ),
@@ -826,6 +1211,9 @@ class LedgerReadModelImpl @Inject constructor(
     private val database: LedgerDatabase,
 ) : LedgerReadModel {
     override suspend fun accounts(): List<Account> = database.accounts().getAll().map { it.toDomain() }
+
+    override suspend fun accountsIncludingDeleted(): List<Account> =
+        database.accounts().getAllIncludingDeleted().map { it.toDomain() }
 
     override suspend fun transactions(): List<LedgerTransaction> = database.transactions().getAll().map { it.toDomain() }
 

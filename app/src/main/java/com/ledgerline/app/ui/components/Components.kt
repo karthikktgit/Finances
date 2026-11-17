@@ -1,6 +1,11 @@
 package com.ledgerline.app.ui.components
 
+import com.ledgerline.app.ui.theme.depth
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
@@ -17,6 +22,7 @@ import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -29,15 +35,24 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.CardDefaults
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextAlign
+import com.ledgerline.app.R
 import com.ledgerline.app.finance.money.MoneyFormat
 import com.ledgerline.app.ui.theme.LocalLedgerColors
-import java.time.Instant
 import java.time.LocalDate
-import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
@@ -70,17 +85,41 @@ fun MoneyText(minor: Long, currency: String, modifier: Modifier = Modifier, larg
 }
 
 @Composable
-fun LedgerCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
-    Card(modifier = modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp), content = content)
-    }
+fun BrandMark(modifier: Modifier = Modifier) {
+    Image(
+        painter = painterResource(R.drawable.ic_brand),
+        contentDescription = "Ledgerline",
+        modifier = modifier.size(40.dp),
+    )
+}
+
+@Composable
+fun LedgerCard(
+    modifier: Modifier = Modifier,
+    compact: Boolean = false,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Column(
+        modifier.fillMaxWidth().depth(RoundedCornerShape(20.dp)).padding(horizontal = 16.dp, vertical = if (compact) 12.dp else 14.dp),
+        verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 8.dp),
+        content = content,
+    )
 }
 
 @Composable
 fun EmptyPane(title: String, body: String, modifier: Modifier = Modifier) {
-    Column(modifier.padding(vertical = 24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(title, style = MaterialTheme.typography.titleMedium)
-        Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    Column(
+        modifier.fillMaxWidth().padding(vertical = 28.dp, horizontal = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(title, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
+        Text(
+            body,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
     }
 }
 
@@ -91,8 +130,13 @@ fun PrimaryButton(
     enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
-    Button(onClick = onClick, enabled = enabled, modifier = modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-        Text(text)
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        shape = RoundedCornerShape(16.dp),
+        modifier = modifier.fillMaxWidth().heightIn(min = 52.dp),
+    ) {
+        Text(text, style = MaterialTheme.typography.titleSmall)
     }
 }
 
@@ -124,19 +168,22 @@ fun DateField(
     onDate: (LocalDate) -> Unit,
 ) {
     var open by rememberSaveable { mutableStateOf(false) }
-    OutlinedButton(onClick = { open = true }, modifier = modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-        Text("Date ${date.format(DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.getDefault()))}")
-    }
+    FieldRow(
+        label = "Date",
+        value = date.format(DateTimeFormatter.ofPattern("EEE, MMM d, yyyy", Locale.getDefault())),
+        modifier = modifier,
+        onClick = { open = true },
+    )
     if (open) {
         val state = rememberDatePickerState(
-            initialSelectedDateMillis = date.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli(),
+            initialSelectedDateMillis = com.ledgerline.app.finance.time.FinancialDate.toPickerMillis(date),
         )
         DatePickerDialog(
             onDismissRequest = { open = false },
             confirmButton = {
                 TextButton(onClick = {
                     state.selectedDateMillis?.let { millis ->
-                        onDate(Instant.ofEpochMilli(millis).atZone(ZoneOffset.UTC).toLocalDate())
+                        onDate(com.ledgerline.app.finance.time.FinancialDate.fromPickerMillis(millis))
                     }
                     open = false
                 }) { Text("Use this date") }
@@ -156,9 +203,7 @@ fun <T> PickerField(
     onSelect: (T) -> Unit,
 ) {
     var open by rememberSaveable { mutableStateOf(false) }
-    OutlinedButton(onClick = { open = true }, modifier = modifier.fillMaxWidth().heightIn(min = 48.dp)) {
-        Text("$label: $value")
-    }
+    FieldRow(label = label, value = value, modifier = modifier, onClick = { open = true })
     if (open) {
         AlertDialog(
             onDismissRequest = { open = false },
@@ -195,19 +240,54 @@ fun ConfirmDialog(title: String, body: String, confirm: String, onConfirm: () ->
 }
 
 @Composable
+fun CompactButton(label: String, onClick: () -> Unit, selected: Boolean = false, modifier: Modifier = Modifier) {
+    val shape = RoundedCornerShape(50)
+    val background = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainer
+    val content = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface
+    Box(
+        // The tap area is at least 48 dp tall; only the smaller rounded shape is drawn.
+        modifier
+            .minimumInteractiveComponentSize()
+            .clip(shape)
+            .background(background)
+            .clickable(onClick = onClick)
+            .semantics { role = Role.Button }
+            .padding(
+                horizontal = CompactButtonSpec.HORIZONTAL_PADDING_DP.dp + 4.dp,
+                vertical = CompactButtonSpec.VERTICAL_PADDING_DP.dp + 2.dp,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(label, color = content, style = MaterialTheme.typography.labelLarge, maxLines = 1, softWrap = false)
+    }
+}
+
+@Composable
 fun BudgetMeter(spent: Long, budget: Long, currency: String) {
     val fraction = if (budget <= 0L) 0f else (spent.toFloat() / budget.toFloat()).coerceIn(0f, 1f)
-    LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+    val colors = LocalLedgerColors.current
+    ProgressTrack(fraction, color = if (spent > budget) colors.negative else MaterialTheme.colorScheme.primary)
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-        Text("Spent ${MoneyFormat.format(spent, currency)}", style = MaterialTheme.typography.bodyMedium)
-        Text("Budget ${MoneyFormat.format(budget, currency)}", style = MaterialTheme.typography.bodyMedium)
+        Text("Spent ${MoneyFormat.format(spent, currency)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text("of ${MoneyFormat.format(budget, currency)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
 @Composable
 fun KeyValue(label: String, value: String, modifier: Modifier = Modifier) {
     Row(modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyMedium)
-        Text(value, style = MaterialTheme.typography.bodyLarge)
+        Text(
+            label,
+            modifier = Modifier.weight(1f),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodyMedium,
+            softWrap = true,
+        )
+        Text(
+            value,
+            modifier = Modifier.padding(start = 8.dp),
+            style = MaterialTheme.typography.bodyLarge,
+            softWrap = false,
+        )
     }
 }

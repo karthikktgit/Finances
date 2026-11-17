@@ -47,6 +47,12 @@ object TransactionRules {
         ) {
             return "Custom schedules need an interval of at least one day."
         }
+        if (draft.endOn != null && draft.endOn.isBefore(draft.startOn)) {
+            return "The end date cannot be before the first due date."
+        }
+        if (draft.maxOccurrences != null && draft.maxOccurrences < 1) {
+            return "The number of payments must be at least 1."
+        }
         return null
     }
 

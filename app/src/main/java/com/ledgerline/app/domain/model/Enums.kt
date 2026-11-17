@@ -56,6 +56,7 @@ enum class PaymentPriority {
 }
 
 enum class RecurrenceFrequency {
+    ONCE,
     DAILY,
     WEEKLY,
     BIWEEKLY,
@@ -63,6 +64,18 @@ enum class RecurrenceFrequency {
     QUARTERLY,
     YEARLY,
     CUSTOM,
+}
+
+enum class OccurrenceState {
+    SCHEDULED,
+    PAID,
+    SKIPPED,
+}
+
+enum class SeriesScope {
+    THIS_OCCURRENCE,
+    THIS_AND_FUTURE,
+    ENTIRE_SERIES,
 }
 
 enum class CashFlowDirection {
@@ -105,6 +118,9 @@ enum class Necessity {
 enum class BudgetPeriod {
     WEEKLY,
     MONTHLY,
+
+    /** From one payday to the next, so an envelope matches the pay it is split from. */
+    PAY_CYCLE,
 }
 
 enum class BudgetPace {
@@ -113,8 +129,34 @@ enum class BudgetPace {
     OVER,
 }
 
+enum class CycleType {
+    WEEKLY,
+    BIWEEKLY,
+    SEMIMONTHLY,
+    MONTHLY,
+}
+
 enum class ThemeChoice {
     SYSTEM,
     LIGHT,
     DARK,
+}
+
+enum class DebtType {
+    CREDIT_CARD,
+    EDUCATION_LOAN,
+    OTHER,
+}
+
+enum class RateType {
+    FIXED,
+    VARIABLE,
+    UNKNOWN,
+}
+
+enum class PayChoice {
+    MINIMUM,
+    FIXED,
+    MINIMUM_PLUS,
+    SAVED_PLAN,
 }

@@ -19,6 +19,12 @@ fun LocalDate.medium(): String = format(DateTimeFormatter.ofPattern("MMM d", Loc
 
 fun LocalDate.withYear(): String = format(DateTimeFormatter.ofPattern("MMM d, yyyy", Locale.getDefault()))
 
+fun cycleRange(start: LocalDate, end: LocalDate): String {
+    val pattern = if (start.year == end.year) "d MMM" else "d MMM yyyy"
+    val format = DateTimeFormatter.ofPattern(pattern, Locale.getDefault())
+    return "${start.format(format)} – ${end.format(format)}"
+}
+
 fun LocalDate.weekday(): String = format(DateTimeFormatter.ofPattern("EEEE, MMM d", Locale.getDefault()))
 
 fun Account.paymentLabel(): String = lastFour?.let { "$name ····$it" } ?: name
@@ -55,7 +61,10 @@ fun ScheduledKind.label(): String = when (this) {
 fun PaymentPriority.label(): String = name.lowercase(Locale.US).replaceFirstChar { it.titlecase(Locale.US) }
 
 fun RecurrenceFrequency.label(): String = when (this) {
-    RecurrenceFrequency.BIWEEKLY -> "Every two weeks"
+    RecurrenceFrequency.ONCE -> "No repeat"
+    RecurrenceFrequency.BIWEEKLY -> "Every 2 weeks"
+    RecurrenceFrequency.QUARTERLY -> "Every 3 months"
+    RecurrenceFrequency.CUSTOM -> "Custom"
     else -> name.lowercase(Locale.US).replaceFirstChar { it.titlecase(Locale.US) }
 }
 
@@ -76,6 +85,7 @@ fun WarningSeverity.label(): String = name.lowercase(Locale.US).replaceFirstChar
 fun BudgetPeriod.label(): String = when (this) {
     BudgetPeriod.WEEKLY -> "Weekly"
     BudgetPeriod.MONTHLY -> "Monthly"
+    BudgetPeriod.PAY_CYCLE -> "Each pay cycle"
 }
 
 fun BudgetPace.label(): String = when (this) {

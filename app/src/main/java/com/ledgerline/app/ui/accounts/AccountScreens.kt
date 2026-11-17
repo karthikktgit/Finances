@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -34,10 +35,18 @@ import androidx.lifecycle.viewModelScope
 import androidx.navigation.toRoute
 import com.ledgerline.app.domain.model.AccountDraft
 import com.ledgerline.app.domain.model.AccountType
+import com.ledgerline.app.domain.model.OccurrenceState
 import com.ledgerline.app.domain.model.SaveResult
+import com.ledgerline.app.domain.model.LedgerTransaction
 import com.ledgerline.app.domain.repository.AccountRepository
+import com.ledgerline.app.domain.repository.RecurringRepository
 import com.ledgerline.app.domain.repository.TransactionRepository
+import com.ledgerline.app.domain.time.AppClock
+import com.ledgerline.app.finance.account.AccountDeletion
+import com.ledgerline.app.finance.account.AccountDeletionImpact
+import com.ledgerline.app.finance.balance.AccountProjection
 import com.ledgerline.app.finance.balance.BalanceMath
+import com.ledgerline.app.finance.schedule.OccurrenceMaterializer
 import com.ledgerline.app.finance.money.MoneyFormat
 import com.ledgerline.app.finance.policy.FinancePolicy
 import com.ledgerline.app.ui.components.AmountField
@@ -62,27 +71,86 @@ import kotlin.math.abs
 class AccountsViewModel @Inject constructor(
     accounts: AccountRepository,
     transactions: TransactionRepository,
+    recurring: RecurringRepository,
+    private val clock: AppClock,
 ) : ViewModel() {
-    val state = combine(accounts.observe(), transactions.observeAll()) { accts, txs ->
-        accts.map { account -> account to BalanceMath.currentBalanceMinor(account, txs) }
+    internal val state = combine(
+        accounts.observe(),
+        transactions.observeAll(),
+        recurring.observe(),
+        recurring.observeAdjustments(),
+    ) { accts, txs, series, adjustments ->
+        val today = clock.today()
+        val settled = txs.mapNotNull { transaction ->
+            val recurringId = transaction.recurringPaymentId ?: return@mapNotNull null
+            if (!BalanceMath.isActive(transaction)) return@mapNotNull null
+            recurringId to transaction.occurredOn
+        }.toSet()
+        val scheduled = OccurrenceMaterializer.project(
+            items = series,
+            adjustments = adjustments,
+            settled = settled,
+            start = today,
+            end = today.plusYears(1),
+            today = today,
+        ).filter { it.state == OccurrenceState.SCHEDULED }
+        accts.map { account ->
+            val actual = BalanceMath.currentBalanceMinor(account, txs)
+            AccountRow(account, actual, AccountProjection.projectedMinor(actual, account.id, scheduled))
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Repeating items paused because their account was deleted, paired with the deleted account's name. */
+    internal val needsAccount = combine(accounts.observeIncludingDeleted(), recurring.observe()) { all, series ->
+        val deleted = all.filter { it.deleted }
+        AccountDeletion.needsAccount(series, deleted.map { it.id }.toSet()).map { item ->
+            item to AccountDeletion.label(item.accountId, all)
+        }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 }
 
+internal data class AccountRow(
+    val account: com.ledgerline.app.domain.model.Account,
+    val actualMinor: Long,
+    val projectedMinor: Long,
+)
+
 @Composable
-fun AccountsScreen(onEdit: (String) -> Unit, onCreate: () -> Unit, contentPadding: PaddingValues, viewModel: AccountsViewModel = hiltViewModel()) {
+fun AccountsScreen(
+    onEdit: (String) -> Unit,
+    onCreate: () -> Unit,
+    contentPadding: PaddingValues,
+    onEditSchedule: (String) -> Unit = {},
+    viewModel: AccountsViewModel = hiltViewModel(),
+) {
     val rows by viewModel.state.collectAsStateWithLifecycle()
+    val needsAccount by viewModel.needsAccount.collectAsStateWithLifecycle()
     Column(Modifier.fillMaxSize().padding(contentPadding).padding(20.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Accounts", style = MaterialTheme.typography.headlineSmall)
         TextButton(onClick = onCreate, modifier = Modifier.heightIn(min = 48.dp)) { Text("Add account") }
         if (rows.isEmpty()) EmptyPane("No accounts", "A cash wallet is a real account. Add it if you spend cash.")
-        rows.forEach { (account, balance) ->
+        Text("Actual is money already posted. Projected adds unpaid scheduled items on that account and is not cash you have spent.")
+        rows.forEach { row ->
+            val account = row.account
             TextButton(onClick = { onEdit(account.id) }, modifier = Modifier.fillMaxWidth().heightIn(min = 64.dp)) {
                 Column(Modifier.fillMaxWidth()) {
                     Text(account.paymentLabel(), style = MaterialTheme.typography.titleMedium)
                     Text("${account.type.label()} · ${account.institution.ifBlank { "No institution" }} · ${if (account.active) "Active" else "Inactive"}")
-                    Text(MoneyFormat.format(balance, account.currency))
-                    val credit = BalanceMath.availableCreditMinor(account, balance)
+                    Text("Actual ${MoneyFormat.format(row.actualMinor, account.currency)}")
+                    Text("Projected ${MoneyFormat.format(row.projectedMinor, account.currency)}")
+                    val credit = BalanceMath.availableCreditMinor(account, row.actualMinor)
                     if (credit != null) Text("Available credit ${MoneyFormat.format(credit, account.currency)}")
+                }
+            }
+        }
+        if (needsAccount.isNotEmpty()) {
+            Text("Needs a new account", style = MaterialTheme.typography.titleMedium)
+            Text("These repeating items were paused when their account was deleted. Open one to choose an account and turn it back on.")
+            needsAccount.forEach { (item, accountLabel) ->
+                TextButton(onClick = { onEditSchedule(item.id) }, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) {
+                    Column(Modifier.fillMaxWidth()) {
+                        Text(item.name, style = MaterialTheme.typography.titleSmall)
+                        Text("$accountLabel · ${MoneyFormat.format(item.amountMinor, item.currency)} · ${if (item.active) "On" else "Paused"}")
+                    }
                 }
             }
         }
@@ -94,6 +162,8 @@ class AccountEditorViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val accounts: AccountRepository,
     transactions: TransactionRepository,
+    recurring: RecurringRepository,
+    private val clock: AppClock,
 ) : ViewModel() {
     private val args = savedStateHandle.toRoute<AccountEditorRoute>()
     val accountId = args.accountId
@@ -101,6 +171,31 @@ class AccountEditorViewModel @Inject constructor(
     val balances = combine(accounts.observe(), transactions.observeAll()) { accts, txs ->
         accts.associate { it.id to BalanceMath.currentBalanceMinor(it, txs) }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+    val activity = combine(
+        transactions.observeAll(),
+        recurring.observe(),
+        recurring.observeAdjustments(),
+    ) { txs, series, adjustments ->
+        if (accountId.isBlank()) {
+            emptyList<LedgerTransaction>() to emptyList<com.ledgerline.app.finance.schedule.ProjectedOccurrence>()
+        } else {
+            val today = clock.today()
+            val settled = txs.mapNotNull { transaction ->
+                val recurringId = transaction.recurringPaymentId ?: return@mapNotNull null
+                if (!BalanceMath.isActive(transaction)) return@mapNotNull null
+                recurringId to transaction.occurredOn
+            }.toSet()
+            val scheduled = OccurrenceMaterializer.project(
+                items = series,
+                adjustments = adjustments,
+                settled = settled,
+                start = today.minusYears(1),
+                end = today.plusYears(1),
+                today = today,
+            ).filter { it.accountId == accountId }
+            txs.filter { BalanceMath.isActive(it) && (it.accountId == accountId || it.counterAccountId == accountId) } to scheduled
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList<LedgerTransaction>() to emptyList())
     var name by mutableStateOf("")
     var institution by mutableStateOf("")
     var type by mutableStateOf(AccountType.CHECKING)
@@ -113,6 +208,8 @@ class AccountEditorViewModel @Inject constructor(
     var netWorth by mutableStateOf(true)
     var safe by mutableStateOf(true)
     var error by mutableStateOf<String?>(null)
+    var pendingDelete by mutableStateOf<AccountDeletionImpact?>(null)
+        private set
     private val _done = MutableSharedFlow<Unit>()
     val done = _done.asSharedFlow()
 
@@ -165,9 +262,20 @@ class AccountEditorViewModel @Inject constructor(
         }
     }
 
-    fun delete() {
+    /** Opens the confirmation. Nothing is changed until [confirmDelete]. */
+    fun requestDelete() {
+        if (!isExisting) return
+        viewModelScope.launch { pendingDelete = accounts.deletionImpact(accountId) }
+    }
+
+    fun cancelDelete() {
+        pendingDelete = null
+    }
+
+    fun confirmDelete() {
+        pendingDelete = null
         viewModelScope.launch {
-            when (val result = accounts.deleteIfUnused(accountId)) {
+            when (val result = accounts.delete(accountId)) {
                 SaveResult.Saved -> _done.emit(Unit)
                 is SaveResult.Invalid -> error = result.message
                 is SaveResult.PossibleDuplicate -> Unit
@@ -186,6 +294,7 @@ class AccountEditorViewModel @Inject constructor(
 @Composable
 fun AccountEditorScreen(onDone: () -> Unit, viewModel: AccountEditorViewModel = hiltViewModel()) {
     val balances by viewModel.balances.collectAsStateWithLifecycle()
+    val activity by viewModel.activity.collectAsStateWithLifecycle()
     LaunchedEffect(viewModel) { viewModel.done.collect { onDone() } }
     val currency = "USD"
     Scaffold(topBar = {
@@ -194,7 +303,7 @@ fun AccountEditorScreen(onDone: () -> Unit, viewModel: AccountEditorViewModel = 
             navigationIcon = { TextButton(onClick = onDone, modifier = Modifier.heightIn(min = 48.dp)) { Text("Back") } },
         )
     }) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding).padding(20.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Column(Modifier.fillMaxSize().padding(padding).padding(20.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(viewModel.name, { viewModel.name = it }, Modifier.fillMaxWidth(), label = { Text("Name") }, singleLine = true)
             OutlinedTextField(viewModel.institution, { viewModel.institution = it }, Modifier.fillMaxWidth(), label = { Text("Institution") }, singleLine = true)
             PickerField("Type", viewModel.type.label(), AccountType.entries.toList(), { it.label() }) {
@@ -239,9 +348,49 @@ fun AccountEditorScreen(onDone: () -> Unit, viewModel: AccountEditorViewModel = 
                 Switch(viewModel.safe, { viewModel.safe = it })
             }
             Text("Sync status: manual. Bank connections are not part of this version.")
+            if (viewModel.isExisting) {
+                Text("Transactions on this account", style = MaterialTheme.typography.titleMedium)
+                if (activity.first.isEmpty()) Text("No posted transactions yet.")
+                activity.first.sortedByDescending { it.occurredOn }.forEach { tx ->
+                    Text("${tx.occurredOn} · ${tx.type.label()} · ${tx.merchantRaw.ifBlank { tx.type.label() }} · ${MoneyFormat.signedLabel(tx.balanceEffectMinor, tx.currency)}")
+                }
+                Text("Scheduled payments", style = MaterialTheme.typography.titleMedium)
+                if (activity.second.isEmpty()) Text("No scheduled payments on this account.")
+                activity.second.forEach { item ->
+                    Text("${item.date} · ${item.name} · ${item.state.name} · ${MoneyFormat.format(item.amountMinor, "USD")}")
+                }
+            }
             viewModel.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             PrimaryButton("Save account", onClick = viewModel::save)
-            if (viewModel.isExisting) TextButton(onClick = viewModel::delete, modifier = Modifier.heightIn(min = 48.dp)) { Text("Delete if unused") }
+            if (viewModel.isExisting) {
+                TextButton(onClick = viewModel::requestDelete, modifier = Modifier.heightIn(min = 48.dp)) {
+                    Text("Delete Account", color = MaterialTheme.colorScheme.error)
+                }
+            }
         }
+    }
+    viewModel.pendingDelete?.let { impact ->
+        AlertDialog(
+            onDismissRequest = viewModel::cancelDelete,
+            title = { Text("Delete ${viewModel.name.ifBlank { "this account" }}?") },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(AccountDeletion.CONFIRMATION)
+                    if (impact.empty) {
+                        Text("This account has no transactions, schedules, debts, or budgets.")
+                    } else {
+                        impact.lines().forEach { Text("• $it") }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = viewModel::confirmDelete, modifier = Modifier.heightIn(min = 48.dp)) {
+                    Text("Delete Account", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = viewModel::cancelDelete, modifier = Modifier.heightIn(min = 48.dp)) { Text("Cancel") }
+            },
+        )
     }
 }

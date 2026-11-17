@@ -23,6 +23,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.ledgerline.app.BuildConfig
 import com.ledgerline.app.domain.model.AccountDraft
 import com.ledgerline.app.domain.model.AccountType
 import com.ledgerline.app.domain.model.SaveResult
@@ -32,6 +33,7 @@ import com.ledgerline.app.domain.repository.SettingsRepository
 import com.ledgerline.app.finance.policy.FinancePolicy
 import com.ledgerline.app.ui.components.AmountField
 import com.ledgerline.app.ui.components.PickerField
+import com.ledgerline.app.ui.components.BrandMark
 import com.ledgerline.app.ui.components.PrimaryButton
 import com.ledgerline.app.ui.format.label
 import dagger.hilt.android.lifecycle.HiltViewModel
@@ -88,7 +90,7 @@ class OnboardingViewModel @Inject constructor(
 @Composable
 fun OnboardingScreen(viewModel: OnboardingViewModel = hiltViewModel()) {
     var step by rememberSaveable { mutableIntStateOf(0) }
-    var currency by rememberSaveable { mutableStateOf("USD") }
+    var currency by rememberSaveable { mutableStateOf(localCurrency()) }
     var buffer by rememberSaveable { mutableStateOf(FinancePolicy.DEFAULT_BUFFER_MINOR) }
     var name by rememberSaveable { mutableStateOf("") }
     var typeName by rememberSaveable { mutableStateOf(AccountType.CHECKING.name) }
@@ -96,22 +98,33 @@ fun OnboardingScreen(viewModel: OnboardingViewModel = hiltViewModel()) {
     val type = runCatching { AccountType.valueOf(typeName) }.getOrDefault(AccountType.CHECKING)
     Column(
         Modifier.fillMaxSize().padding(24.dp).verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         when (step) {
             0 -> {
+                BrandMark()
                 Text("Ledgerline", style = MaterialTheme.typography.headlineMedium)
-                Text("See what is left to spend after money you already owe, bills that are scheduled, and income you expect.")
-                Text("Estimates stay on this device. They are not a promise that the money will be there.")
+                Text("Know what you can spend. Note spends in seconds, or let Ledgerline pick them up from your payment alerts.")
+                Text(
+                    "Everything stays on this phone. Figures are estimates, not a promise that the money will be there.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 PrimaryButton("Continue") { step = 1 }
                 TextButton(onClick = viewModel::skip, modifier = Modifier.heightIn(min = 48.dp)) { Text("Skip and set up later") }
-                TextButton(onClick = viewModel::loadSample, modifier = Modifier.heightIn(min = 48.dp)) { Text("Explore with sample finances") }
+                if (BuildConfig.DEBUG) {
+                    TextButton(onClick = viewModel::loadSample, modifier = Modifier.heightIn(min = 48.dp)) {
+                        Text("Explore with sample finances")
+                    }
+                }
             }
             1 -> {
                 Text("Currency and buffer", style = MaterialTheme.typography.headlineSmall)
-                PickerField("Currency", currency, listOf("USD", "EUR", "GBP", "INR", "CAD"), { it }) { currency = it }
+                PickerField("Currency", currency, OnboardingCurrencies.list, { it }) { currency = it }
                 AmountField(buffer, currency) { buffer = it }
-                Text("The buffer stays out of the safe-to-spend estimate.")
+                Text(
+                    "The buffer is a cushion you never want to dip into. It is kept out of what is safe to spend.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 PrimaryButton("Continue") { step = 2 }
             }
             else -> {
@@ -127,3 +140,14 @@ fun OnboardingScreen(viewModel: OnboardingViewModel = hiltViewModel()) {
         }
     }
 }
+
+object OnboardingCurrencies {
+    val list = listOf("USD", "EUR", "GBP", "INR", "CAD", "AUD", "SGD", "AED")
+}
+
+/** The phone's own currency when it is one we list, so most people never need to change it. */
+private fun localCurrency(): String =
+    runCatching { java.util.Currency.getInstance(java.util.Locale.getDefault()).currencyCode }
+        .getOrNull()
+        ?.takeIf { it in OnboardingCurrencies.list }
+        ?: "USD"

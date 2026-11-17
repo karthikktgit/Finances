@@ -24,6 +24,7 @@ data class AccountEntity(
     val sortOrder: Int,
     val createdAtEpochMillis: Long,
     val updatedAtEpochMillis: Long,
+    val deletedAtEpochMillis: Long? = null,
 )
 
 @Entity(
@@ -132,6 +133,11 @@ data class TransactionEntity(
     val createdAtEpochMillis: Long,
     val updatedAtEpochMillis: Long,
     val deletedAtEpochMillis: Long?,
+    val unplanned: Boolean = false,
+    /** False for a spend you planned but have not paid yet; it does not count until it is paid. */
+    @androidx.room.ColumnInfo(defaultValue = "1") val paid: Boolean = true,
+    /** The day it was planned for, kept after it is paid so planned and paid can be compared. */
+    val plannedOn: String? = null,
 )
 
 @Entity(
@@ -163,6 +169,37 @@ data class RecurringPaymentEntity(
     val note: String,
     val createdAtEpochMillis: Long,
     val updatedAtEpochMillis: Long,
+    val maxOccurrences: Int? = null,
+    /** Due dates on or after this day are marked paid automatically (autopay). Null means paid by hand. */
+    val autopaySince: String? = null,
+)
+
+@Entity(
+    tableName = "recurring_occurrences",
+    foreignKeys = [
+        ForeignKey(
+            entity = RecurringPaymentEntity::class,
+            parentColumns = ["id"],
+            childColumns = ["recurringPaymentId"],
+            onDelete = ForeignKey.CASCADE,
+        ),
+    ],
+    indices = [
+        Index(value = ["recurringPaymentId", "occurrenceOn"], unique = true),
+        Index("recurringPaymentId"),
+    ],
+)
+data class RecurringOccurrenceEntity(
+    @PrimaryKey val id: String,
+    val recurringPaymentId: String,
+    val occurrenceOn: String,
+    val state: String,
+    val amountMinor: Long?,
+    val name: String?,
+    val paidTransactionId: String?,
+    val note: String,
+    val createdAtEpochMillis: Long,
+    val updatedAtEpochMillis: Long,
 )
 
 @Entity(
@@ -185,6 +222,12 @@ data class BudgetEntity(
     val active: Boolean,
     val createdAtEpochMillis: Long,
     val updatedAtEpochMillis: Long,
+    /** First day of the first cycle it is planned in; null means always. */
+    val startOn: String? = null,
+    /** First day of the last cycle it is planned in; null means it goes on. */
+    val endOn: String? = null,
+    /** How many cycles it runs for, when it was set that way (shown when editing). */
+    val maxCycles: Int? = null,
 )
 
 @Entity(
@@ -213,6 +256,78 @@ data class DebtEntity(
     val currency: String,
     val createdAtEpochMillis: Long,
     val updatedAtEpochMillis: Long,
+    val debtType: String = "OTHER",
+    val rateType: String = "UNKNOWN",
+    val paymentAccountId: String? = null,
+    val statementCloseDay: Int? = null,
+    val originationOn: String? = null,
+    val maturityOn: String? = null,
+    val remainingTermMonths: Int? = null,
+    val feeMinor: Long = 0,
+    val rateUpdatedOn: String? = null,
+    val accruedInterestMinor: Long? = null,
+    val showInCalendar: Boolean = true,
+    val aprKnown: Boolean = true,
+    val minimumKnown: Boolean = true,
+    val purchaseAprBasisPoints: Int? = null,
+    val balanceTransferAprBasisPoints: Int? = null,
+    val cashAdvanceAprBasisPoints: Int? = null,
+    val graceOnPurchases: Boolean = false,
+    val dayCountBasis: Int = 365,
+    val recurringPaymentId: String? = null,
+    val note: String = "",
+)
+
+@Entity(
+    tableName = "debt_month_plans",
+    foreignKeys = [
+        ForeignKey(entity = DebtEntity::class, parentColumns = ["id"], childColumns = ["debtId"], onDelete = ForeignKey.CASCADE),
+    ],
+    indices = [Index(value = ["debtId", "yearMonth"], unique = true)],
+)
+data class DebtMonthPlanEntity(
+    @PrimaryKey val id: String,
+    val debtId: String,
+    val yearMonth: String,
+    val plannedPaymentMinor: Long,
+    val dueOn: String?,
+    val updatedAtEpochMillis: Long,
+)
+
+@Entity(
+    tableName = "debt_rate_changes",
+    foreignKeys = [
+        ForeignKey(entity = DebtEntity::class, parentColumns = ["id"], childColumns = ["debtId"], onDelete = ForeignKey.CASCADE),
+    ],
+    indices = [Index("debtId")],
+)
+data class DebtRateChangeEntity(
+    @PrimaryKey val id: String,
+    val debtId: String,
+    val effectiveOn: String,
+    val aprBasisPoints: Int,
+    val note: String,
+)
+
+@Entity(
+    tableName = "debt_settlements",
+    foreignKeys = [
+        ForeignKey(entity = DebtEntity::class, parentColumns = ["id"], childColumns = ["debtId"], onDelete = ForeignKey.CASCADE),
+    ],
+    indices = [Index(value = ["debtId", "yearMonth"], unique = true), Index("linkId")],
+)
+data class DebtSettlementEntity(
+    @PrimaryKey val id: String,
+    val debtId: String,
+    val yearMonth: String,
+    val paidOn: String,
+    val amountMinor: Long,
+    val transactionId: String,
+    val linkId: String?,
+    val interestMinor: Long,
+    val principalMinor: Long,
+    val feeMinor: Long,
+    val splitKnown: Boolean,
 )
 
 @Entity(
@@ -252,6 +367,18 @@ data class SyncRecordEntity(
     val createdAtEpochMillis: Long,
 )
 
+@Entity(tableName = "expense_notes")
+data class ExpenseNoteEntity(
+    @PrimaryKey val id: String,
+    val name: String,
+    val amountMinor: Long?,
+    val dueOn: String?,
+    val note: String,
+    val completed: Boolean,
+    val createdAtEpochMillis: Long,
+    val updatedAtEpochMillis: Long,
+)
+
 @Entity(tableName = "user_settings")
 data class UserSettingsEntity(
     @PrimaryKey val id: Int = 1,
@@ -260,4 +387,107 @@ data class UserSettingsEntity(
     val horizonDays: Int,
     val onboardingCompleted: Boolean,
     val updatedAtEpochMillis: Long,
+    val cycleType: String = "MONTHLY",
+    val cycleAnchor: String = "2026-01-20",
+    val cycleStartDay: Int = 20,
+    val cycleSecondDay: Int = 5,
+)
+
+/**
+ * A payment read from an SMS, email, or wallet notification. It is a suggestion only: it never changes a balance
+ * until you add it, which creates a normal transaction.
+ */
+@Entity(
+    tableName = "captured_spends",
+    indices = [Index(value = ["fingerprint"], unique = true), Index("status")],
+)
+data class CapturedSpendEntity(
+    @PrimaryKey val id: String,
+    val packageName: String,
+    val sourceLabel: String,
+    val channel: String,
+    val amountMinor: Long,
+    val currency: String,
+    val merchant: String,
+    val lastFour: String?,
+    val direction: String,
+    val refund: Boolean,
+    val occurredOn: String,
+    val capturedAtEpochMillis: Long,
+    /** A short excerpt of the notification with long numbers masked, so you can tell what it was. */
+    val preview: String,
+    val status: String,
+    val transactionId: String?,
+    val fingerprint: String,
+)
+
+@Entity(tableName = "savings_goals")
+data class SavingsGoalEntity(
+    @PrimaryKey val id: String,
+    val name: String,
+    val targetMinor: Long,
+    val currency: String,
+    val targetDate: String?,
+    val accountId: String?,
+    val useAccountBalance: Boolean,
+    val monthlyMinor: Long?,
+    val createdOn: String,
+    val archived: Boolean,
+    val updatedAtEpochMillis: Long,
+    /** What became of the money (GoalOutcome name); null while it is still held for the goal. */
+    val outcome: String? = null,
+    val outcomeOn: String? = null,
+)
+
+@Entity(
+    tableName = "goal_contributions",
+    foreignKeys = [
+        ForeignKey(entity = SavingsGoalEntity::class, parentColumns = ["id"], childColumns = ["goalId"], onDelete = ForeignKey.CASCADE),
+    ],
+    indices = [Index("goalId")],
+)
+data class GoalContributionEntity(
+    @PrimaryKey val id: String,
+    val goalId: String,
+    val amountMinor: Long,
+    val onDate: String,
+    val note: String,
+    val createdAtEpochMillis: Long,
+    /** GoalEntryKind name; null for older entries (saved if positive, taken out if negative). */
+    val kind: String? = null,
+    val transactionId: String? = null,
+)
+
+/** A group on Home, such as "Monthly" or "Subscriptions", holding bills and spending envelopes. */
+@Entity(tableName = "home_groups")
+data class HomeGroupEntity(
+    @PrimaryKey val id: String,
+    val name: String,
+    val sortOrder: Int,
+)
+
+/** Which group a bill ("bill:<id>") or spending envelope ("budget:<id>") sits in on Home. */
+@Entity(tableName = "home_group_items")
+data class HomeGroupItemEntity(
+    @PrimaryKey val itemKey: String,
+    val groupId: String,
+    val sortOrder: Int,
+)
+
+/** One cycle's own amount for a spending item ("budget:<id>") or goal ("goal:<id>"). Zero means off that cycle. */
+@Entity(tableName = "cycle_amounts", primaryKeys = ["cycleStart", "itemKey"])
+data class CycleAmountEntity(
+    val cycleStart: String,
+    val itemKey: String,
+    val amountMinor: Long,
+    val updatedAtEpochMillis: Long,
+)
+
+/** The start-of-cycle checklist for one cycle: statements checked (account ids, comma separated), balances, done. */
+@Entity(tableName = "cycle_reviews")
+data class CycleReviewEntity(
+    @PrimaryKey val cycleStart: String,
+    val reviewedAccounts: String,
+    val balancesChecked: Boolean,
+    val completedAtEpochMillis: Long?,
 )

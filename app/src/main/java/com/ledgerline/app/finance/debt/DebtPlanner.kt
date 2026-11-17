@@ -2,8 +2,8 @@ package com.ledgerline.app.finance.debt
 
 import com.ledgerline.app.domain.model.Debt
 import com.ledgerline.app.domain.model.DebtStrategy
-import java.math.BigDecimal
-import java.math.RoundingMode
+import java.time.LocalDate
+import java.time.YearMonth
 
 data class DebtPlan(
     val strategy: DebtStrategy,
@@ -16,16 +16,24 @@ data class DebtPlan(
 
 object DebtPlanner {
     const val ASSUMPTION =
-        "Estimated monthly interest is balance times APR divided by 12. " +
-            "Minimums are paid first. Extra money goes to one debt at a time, and any leftover moves to the next debt in the order. " +
-            "This is an estimate, not a lender quote."
+        "Payoff order is an estimate. Interest uses a daily periodic rate, APR divided by 365, times the days in each month, " +
+            "on the balance before that month's payment. Minimums are paid first. Extra money goes to one debt at a time. " +
+            "This is not a lender quote."
 
     private const val MAX_MONTHS = 360
 
     fun plan(debts: List<Debt>, extraMonthlyMinor: Long, strategy: DebtStrategy): DebtPlan {
         val extra = extraMonthlyMinor.coerceAtLeast(0)
         val state = debts.filter { it.balanceMinor > 0 }.map {
-            Working(it.id, it.name, it.balanceMinor, it.aprBasisPoints, it.minimumPaymentMinor.coerceAtLeast(0))
+            Working(
+                it.id,
+                it.name,
+                it.balanceMinor,
+                it.aprBasisPoints,
+                it.minimumPaymentMinor.coerceAtLeast(0),
+                it.aprKnown,
+                it.dayCountBasis,
+            )
         }.toMutableList()
         if (state.isEmpty()) {
             return DebtPlan(strategy, 0, 0, emptyList(), false, ASSUMPTION)
@@ -34,11 +42,14 @@ object DebtPlanner {
         var interest = 0L
         var month = 0
         val paid = mutableListOf<String>()
+        var cursor = YearMonth.from(LocalDate.of(2026, 1, 1))
         while (state.any { it.balance > 0 } && month < MAX_MONTHS) {
             month += 1
+            val days = cursor.lengthOfMonth()
+            cursor = cursor.plusMonths(1)
             state.forEach { debt ->
-                if (debt.balance <= 0) return@forEach
-                val charge = monthlyInterest(debt.balance, debt.aprBasisPoints)
+                if (debt.balance <= 0 || !debt.aprKnown) return@forEach
+                val charge = InterestMath.onBalance(debt.balance, debt.aprBasisPoints, days, debt.dayCountBasis)
                 debt.balance += charge
                 interest += charge
             }
@@ -70,14 +81,6 @@ object DebtPlanner {
         )
     }
 
-    private fun monthlyInterest(balance: Long, aprBasisPoints: Int): Long {
-        if (balance <= 0 || aprBasisPoints <= 0) return 0
-        return BigDecimal.valueOf(balance)
-            .multiply(BigDecimal.valueOf(aprBasisPoints.toLong()))
-            .divide(BigDecimal.valueOf(120_000), 0, RoundingMode.HALF_UP)
-            .longValueExact()
-    }
-
     private fun ordered(debts: List<Working>, strategy: DebtStrategy): List<Working> = when (strategy) {
         DebtStrategy.AVALANCHE -> debts.sortedWith(compareByDescending<Working> { it.aprBasisPoints }.thenBy { it.balance })
         DebtStrategy.SNOWBALL -> debts.sortedWith(compareBy<Working> { it.balance }.thenByDescending { it.aprBasisPoints })
@@ -90,5 +93,7 @@ object DebtPlanner {
         var balance: Long,
         val aprBasisPoints: Int,
         val minimum: Long,
+        val aprKnown: Boolean,
+        val dayCountBasis: Int,
     )
 }
